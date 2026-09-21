@@ -1,0 +1,178 @@
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <vector>
+
+#include <exo/protocol/master_node_reliable_control.h>
+
+struct FakeTransport {
+    int failures_remaining = 1;
+    std::vector<uint8_t> frame;
+    uint8_t node = 0U;
+    static bool send(void *context, uint8_t node, const uint8_t *frame,
+            uint16_t length)
+    {
+        auto &self = *static_cast<FakeTransport *>(context);
+        self.node = node;
+        if (self.failures_remaining > 0) {
+            --self.failures_remaining;
+            return false;
+        }
+        self.frame.assign(frame, frame + length);
+        return true;
+    }
+};
+
+static exo::RecordReliableFrameHeader header_of(
+        const std::vector<uint8_t> &frame)
+{
+    assert(frame.size() >= sizeof(exo::RecordReliableFrameHeader));
+    exo::RecordReliableFrameHeader header{};
+    std::memcpy(&header, frame.data(), sizeof(header));
+    return header;
+}
+
+template<typename T>
+static T body_of(const std::vector<uint8_t> &frame)
+{
+    T body{};
+    assert(frame.size() == sizeof(exo::RecordReliableFrameHeader) + sizeof(T));
+    std::memcpy(&body, frame.data() + sizeof(exo::RecordReliableFrameHeader),
+            sizeof(T));
+    return body;
+}
+
+int main()
+{
+    FakeTransport transport;
+    exo::MasterNodeReliableControl control(&FakeTransport::send, &transport);
+    exo::RecordDoneMessage done{};
+    done.command = exo::RecordCommand::RecordDone;
+    done.node_id = 3U;
+    done.session_id = 42U;
+    done.total_size = 1000U;
+    done.payload_crc32 = 0x12345678U;
+
+    assert(control.begin(done));
+    assert(control.pending());
+    assert(!control.service(100U));
+    assert(control.pending());
+    assert(!control.service(110U));
+    assert(control.service(120U));
+    assert(!control.pending());
+    assert(transport.node == 3U);
+
+    auto header = header_of(transport.frame);
+    assert(header.command == exo::RecordCommand::ReliableFrame);
+    assert(header.proto_version == 6U);
+    assert(header.magic == exo::kRecordReliableMagic);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::ManifestAck));
+    auto manifest_ack =
+            body_of<exo::RecordReliableManifestAckPayload>(transport.frame);
+    assert(manifest_ack.source_id == 3U);
+    assert(manifest_ack.session_id == 42U);
+    assert(manifest_ack.accepted_chunk_size ==
+            exo::kRecordReliableDefaultChunkSize);
+    assert(manifest_ack.credit == 8U);
+    assert(header.payload_crc16 ==
+            exo::MasterNodeReliableControl::crc16_ccitt(
+                    reinterpret_cast<const uint8_t *>(&manifest_ack),
+                    sizeof(manifest_ack)));
+
+    /* The NACK owns its own slot: gap/corrupt recovery outranks credit refresh
+     * and must never be rejected by a queued control frame. */
+    assert(control.ack_window(5U, 9U));
+    assert(control.nack_range(4U, 2U));
+    assert(control.pending());
+    assert(control.service(200U));
+    header = header_of(transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::NackRange));
+    auto nack = body_of<exo::RecordReliableNackRangePayload>(transport.frame);
+    assert(nack.first_chunk_index == 4U);
+    assert(nack.chunk_count == 2U);
+    assert(control.pending()); /* the ACK_WINDOW is still queued behind it */
+
+    assert(control.ack_window(6U, 8U));
+    assert(control.ack_window(7U, 8U));
+    assert(control.service(230U));
+    auto ack = body_of<exo::RecordReliableAckWindowPayload>(transport.frame);
+    assert(ack.next_chunk_index == 7U);
+    assert(ack.credit == 8U);
+
+    /* Regression: a NACK arriving while the ManifestAck is still queued must
+     * not be dropped, and the ManifestAck still transmits first. */
+    assert(control.begin(done));
+    assert(control.nack_range(4U, 1U));
+    assert(control.service(300U));
+    header = header_of(transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::ManifestAck));
+    assert(control.service(310U));
+    header = header_of(transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::NackRange));
+    assert(!control.pending());
+
+    /* Initial upload credit waits for the selected link's fast-preparation
+     * outcome. Recovery NACKs remain serviceable while that ManifestAck is
+     * gated, and an ACK_WINDOW cannot bypass the initial-credit gate. */
+    FakeTransport gated_transport;
+    gated_transport.failures_remaining = 0;
+    exo::MasterNodeReliableControl gated(&FakeTransport::send, &gated_transport);
+    assert(gated.begin(done));
+    assert(gated.ack_window(1U, 8U));
+    assert(gated.nack_range(0U, 1U));
+    assert(gated.service(400U, false));
+    header = header_of(gated_transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::NackRange));
+    gated_transport.frame.clear();
+    assert(!gated.service(420U, false));
+    assert(gated_transport.frame.empty());
+    assert(gated.pending());
+    assert(gated.service(440U, true));
+    header = header_of(gated_transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::ManifestAck));
+    assert(gated.pending());
+    assert(gated.service(460U, true));
+    header = header_of(gated_transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::AckWindow));
+
+    /* After ManifestAck has already granted initial credit, a reconnect gate
+     * pauses only the pending ACK-window refresh. Reopening the gate resumes
+     * with ACK_WINDOW and must not ambiguously grant a second ManifestAck. */
+    FakeTransport resume_transport;
+    resume_transport.failures_remaining = 0;
+    exo::MasterNodeReliableControl resume(&FakeTransport::send, &resume_transport);
+    assert(resume.begin(done));
+    assert(resume.service(500U, true));
+    header = header_of(resume_transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::ManifestAck));
+    resume_transport.frame.clear();
+    assert(resume.ack_window(8U, 8U));
+    assert(resume.service(520U, false));
+    assert(resume_transport.frame.empty());
+    assert(resume.pending());
+    assert(resume.service(540U, true));
+    header = header_of(resume_transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::AckWindow));
+
+    assert(!control.verify_ok(0xDEADBEEFU));
+    assert(control.verify_ok(done.payload_crc32));
+    assert(control.service(260U));
+    header = header_of(transport.frame);
+    assert(header.frame_type ==
+            static_cast<uint8_t>(exo::RecordReliableType::VerifyOk));
+    auto verify = body_of<exo::RecordReliableVerifyPayload>(transport.frame);
+    assert(verify.file_crc32 == done.payload_crc32);
+
+    std::cout << "master node reliable control tests passed\n";
+    return 0;
+}

@@ -1,0 +1,2564 @@
+/* USER CODE BEGIN Header */
+/**
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "adc.h"
+#include "dma.h"
+#include "i2c.h"
+#include "ipcc.h"
+#include "usart.h"
+#include "rf.h"
+#include "rtc.h"
+#include "spi.h"
+#include "tim.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "node_swo_trace.h"
+#include <stdarg.h>
+#include <stdio.h>
+#define EXO_LOG(...) NodeSwo_Logf(__VA_ARGS__)
+#include <exo/utils/includer.h>
+#ifndef EXO_NODE_FLASH_ENABLED
+#define EXO_NODE_FLASH_ENABLED 1
+#endif
+#if EXO_NODE_FLASH_ENABLED
+#include <exo/recording/node_recording_app.h>
+#endif
+/* The bounded haptic pulse has no flash dependency, and g_node_haptic_pulse is
+ * declared unconditionally, so this include must sit outside the flash guard:
+ * inside it, a build with EXO_NODE_FLASH_ENABLED=0 fails to compile. */
+#include <exo/actuator/node_haptic_pulse.h>
+#ifndef EXO_NODE_SENSOR_TEST_ENABLE
+#define EXO_NODE_SENSOR_TEST_ENABLE 0
+#endif
+#if EXO_NODE_SENSOR_TEST_ENABLE
+#include <exo/sensors/hub_sensor_test_app.h>
+#endif
+#include <exo/storage/node_runtime_config.h>
+#include <exo/protocol/ble_record_protocol.h>
+#include <exo/protocol/blepipe_proto.h>
+#include <exo/ble/app_ble.h>
+#include <exo/ble/custom_app.h>
+#include <exo/ble/node_upload_pump.h>
+#include <exo/ble/notification_gate.h>
+#include "shci.h"
+#include "stm32wbxx_ll_cortex.h"
+#include "stm32wbxx_ll_exti.h"
+#include "stm32wbxx_ll_pwr.h"
+#include "stm32wbxx_ll_rcc.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#ifndef EXO_NODE_FLASH_ENABLED
+#define EXO_NODE_FLASH_ENABLED 0
+#endif
+
+#ifndef EXO_PROFILE_DIAG
+#define EXO_PROFILE_DIAG 0
+#endif
+
+#ifndef EXO_PROFILE_MINIMAL
+#define EXO_PROFILE_MINIMAL (EXO_PROFILE_DIAG ? 0 : 1)
+#endif
+
+#ifndef EXO_NODE_BLE_FORWARD_ENABLE
+#define EXO_NODE_BLE_FORWARD_ENABLE 1
+#endif
+
+#ifndef EXO_NODE_FLASH_TEST_BOOT_ENABLE
+#if EXO_PROFILE_MINIMAL
+#define EXO_NODE_FLASH_TEST_BOOT_ENABLE 0
+#else
+#define EXO_NODE_FLASH_TEST_BOOT_ENABLE 1
+#endif
+#endif
+
+#ifndef EXO_NODE_FLASH_TEST_API_ENABLE
+#if EXO_PROFILE_MINIMAL
+#define EXO_NODE_FLASH_TEST_API_ENABLE 0
+#else
+#define EXO_NODE_FLASH_TEST_API_ENABLE 1
+#endif
+#endif
+
+#ifndef EXO_NODE_ID
+#define EXO_NODE_ID 1U
+#endif
+
+#ifndef EXO_BLE_LOG_LEVEL
+#define EXO_BLE_LOG_LEVEL 2 /* 0=off,1=error,2=info,3=debug */
+#endif
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
+/* USER CODE BEGIN PV */
+#if EXO_NODE_SENSOR_TEST_ENABLE
+static exo::HubSensorTestApp hub_sensor_test_app(hi2c1, hi2c3, 0x4BU, 0x69U);
+#endif
+
+#if EXO_NODE_FLASH_ENABLED
+static const exo::NodeRecordingConfig NODE_RECORDING_CONFIG = {
+	EXO_NODE_ID,
+	0x4BU,
+	0x69U,
+	0U,
+	0U,
+	0U,
+};
+static exo::NodeRecordingApp node_recording_app(NODE_RECORDING_CONFIG, hi2c1, hi2c3, hspi1,
+		EXO_NODE_FLASH_CS_GPIO_Port, EXO_NODE_FLASH_CS_Pin);
+#endif
+static bool node_stream_enabled = false;
+static uint8_t node_stream_interval_ms = 20U;
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+void PeriphCommonClock_Config(void);
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+static constexpr uint16_t kNodeSwoBufferSize = 1024U;
+static constexpr size_t kNodeSwoMaxWriteSize = 256U;
+static uint8_t g_node_swo_buffer[kNodeSwoBufferSize];
+static volatile uint16_t g_node_swo_head = 0U;
+static volatile uint16_t g_node_swo_tail = 0U;
+static volatile uint32_t g_node_swo_dropped_bytes = 0U;
+
+extern "C" void NodeSwo_Init(uint32_t core_clock_hz, uint32_t swo_clock_hz)
+{
+	if ((core_clock_hz == 0U) || (swo_clock_hz == 0U)
+			|| (core_clock_hz < swo_clock_hz)) {
+		return;
+	}
+
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+	GPIO_InitTypeDef gpio_init = {};
+	gpio_init.Pin = GPIO_PIN_3;
+	gpio_init.Mode = GPIO_MODE_AF_PP;
+	gpio_init.Pull = GPIO_NOPULL;
+	gpio_init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+	gpio_init.Alternate = GPIO_AF0_JTD_TRACE;
+	HAL_GPIO_Init(GPIOB, &gpio_init);
+
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DBGMCU->CR |= DBGMCU_CR_TRACE_IOEN;
+	ITM->LAR = 0xC5ACCE55UL;
+	ITM->TER = 0U;
+	ITM->TCR = 0U;
+	TPI->SPPR = 2U;
+	TPI->ACPR = (core_clock_hz / swo_clock_hz) - 1U;
+	TPI->FFCR = 0x00000100U;
+	ITM->TPR = 0U;
+	ITM->TER = 1UL;
+	ITM->TCR = (1UL << ITM_TCR_TraceBusID_Pos)
+			| ITM_TCR_SWOENA_Msk
+			| ITM_TCR_DWTENA_Msk
+			| ITM_TCR_SYNCENA_Msk
+			| ITM_TCR_ITMENA_Msk;
+	__DSB();
+	__ISB();
+}
+
+extern "C" uint8_t NodeSwo_TryWrite(uint8_t value)
+{
+	if (((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0U)
+			|| ((ITM->TCR & ITM_TCR_ITMENA_Msk) == 0U)
+			|| ((ITM->TER & 1UL) == 0U)
+			|| (ITM->PORT[0U].u32 == 0U)) {
+		return 0U;
+	}
+
+	ITM->PORT[0U].u8 = value;
+	return 1U;
+}
+
+extern "C" size_t NodeSwo_Write(const uint8_t *data, size_t size)
+{
+	if ((data == nullptr) || (size == 0U)) {
+		return 0U;
+	}
+	if (size > kNodeSwoMaxWriteSize) {
+		const uint32_t interrupt_state = __get_PRIMASK();
+		__disable_irq();
+		g_node_swo_dropped_bytes += static_cast<uint32_t>(size);
+		if (interrupt_state == 0U) {
+			__enable_irq();
+		}
+		return 0U;
+	}
+
+	const uint32_t interrupt_state = __get_PRIMASK();
+	__disable_irq();
+
+	const uint16_t head = g_node_swo_head;
+	const uint16_t tail = g_node_swo_tail;
+	const size_t used = (head >= tail)
+			? static_cast<size_t>(head - tail)
+			: static_cast<size_t>(kNodeSwoBufferSize - (tail - head));
+	const size_t available = (kNodeSwoBufferSize - 1U) - used;
+	if (size > available) {
+		g_node_swo_dropped_bytes += static_cast<uint32_t>(size);
+		if (interrupt_state == 0U) {
+			__enable_irq();
+		}
+		return 0U;
+	}
+
+	for (size_t accepted = 0U; accepted < size; ++accepted) {
+		const uint16_t next_head =
+				static_cast<uint16_t>((g_node_swo_head + 1U) % kNodeSwoBufferSize);
+		g_node_swo_buffer[g_node_swo_head] = data[accepted];
+		g_node_swo_head = next_head;
+	}
+
+	if (interrupt_state == 0U) {
+		__enable_irq();
+	}
+	return size;
+}
+
+extern "C" void NodeSwo_Process(void)
+{
+	while (g_node_swo_tail != g_node_swo_head) {
+		const uint8_t value = g_node_swo_buffer[g_node_swo_tail];
+		if (NodeSwo_TryWrite(value) == 0U) {
+			break;
+		}
+		g_node_swo_tail =
+				static_cast<uint16_t>((g_node_swo_tail + 1U) % kNodeSwoBufferSize);
+	}
+}
+
+extern "C" void NodeSwo_Logf(const char *format, ...)
+{
+	if (format == nullptr) {
+		return;
+	}
+
+	char message[224];
+	va_list args;
+	va_start(args, format);
+	const int length = vsnprintf(message, sizeof(message), format, args);
+	va_end(args);
+
+	if (length <= 0) {
+		return;
+	}
+
+	const size_t bytes_to_write =
+			(static_cast<size_t>(length) < sizeof(message))
+			? static_cast<size_t>(length)
+			: (sizeof(message) - 1U);
+	(void)NodeSwo_Write(reinterpret_cast<const uint8_t *>(message), bytes_to_write);
+}
+
+PWM_PIN ERM_PWM(&htim1, TIM_CHANNEL_4, ERM_GPIO_Port, ERM_Pin);
+/* Node-owned bounded haptic pulse (design Section 6.4): the stop deadline
+ * lives here so a lost off-command cannot leave the motor running. */
+static exo::NodeHapticPulse g_node_haptic_pulse;
+PWM_PIN BUZZER(&htim1, TIM_CHANNEL_3, BUZZER_GPIO_Port, BUZZER_Pin);
+
+RGB_LED RGB(RGB_R_GPIO_Port, RGB_R_Pin, RGB_G_GPIO_Port, RGB_G_Pin, RGB_B_GPIO_Port, RGB_B_Pin, 1, 1);
+
+static uint32_t g_node_blepipe_tx_seq = 1U;
+static uint32_t g_node_record_ready_last_status_ms = 0U;
+static uint8_t g_node_record_ready_last_notify_enabled = 0U;
+static uint8_t g_node_record_start_heartbeat_phase = 0U;
+static uint32_t g_node_record_start_heartbeat_last_ms = 0U;
+static bool g_node_touch_test_active = false;
+static bool g_node_poweroff_test_pending = false;
+static uint32_t g_node_touch_test_until_ms = 0U;
+static uint32_t g_node_poweroff_test_at_ms = 0U;
+static constexpr uint8_t kBlepipeStatusKindTouch = 0x03U;
+static constexpr uint8_t kTouchStatusReleased = 0U;
+static constexpr uint8_t kTouchStatusPressed = 1U;
+static constexpr uint8_t kTouchStatusShutdownArmed = 2U;
+static constexpr uint8_t kTouchStatusTurningOff = 3U;
+static constexpr uint16_t kNodeRecordChunkPayloadBytes = exo::kRecordReliableDefaultChunkSize;
+/* A chunk frame (reliable header + payload) wrapped by the blepipe envelope must
+ * fit one BLE notification, or the stack silently drops every chunk -> zero
+ * accepted -> SessionStall at +30 s. Lock it at compile time. */
+static_assert(sizeof(exo::RecordReliableFrameHeader) + kNodeRecordChunkPayloadBytes
+		<= BLEPIPE_MAX_APP_PAYLOAD,
+		"reliable chunk frame exceeds blepipe app payload (MTU-3 minus envelope)");
+/* Foreground calls are bounded only to leave time for sensors/control. BLE
+ * completion and TX-pool events, not a millisecond delay, pace the next work.
+ * The burst re-fills the controller TX queue to the depth it accepts (ST
+ * BLE_Basic_DataThroughput pattern): send until INSUFFICIENT_RESOURCES, then
+ * resume on the next TX-pool-available event. The cap only bounds worst-case
+ * superloop time when the controller accepts a deep queue. */
+static constexpr uint8_t kNodeRecordForegroundBurstLimit = 64U;
+static_assert(kNodeRecordForegroundBurstLimit >= 16U,
+		"20 ms bulk profile needs at least sixteen record notifications per event");
+static_assert((static_cast<uint32_t>(kNodeRecordChunkPayloadBytes) * 16U * 1000U) >=
+		(100000U * 20U),
+		"bulk profile no longer reaches the 100 kB/s theoretical application target");
+static constexpr uint32_t kNodeRecordDoneRetryMs = 500U;
+static constexpr uint32_t kNodeRecordTxFailLogMs = 500U;
+static bool g_node_record_done_sent = false;
+static bool g_node_upload_active = false;
+static uint32_t g_node_upload_session_id = 0U;
+static uint32_t g_node_upload_total_size = 0U;
+static uint32_t g_node_upload_crc32 = 0U;
+static uint32_t g_node_upload_next_chunk = 0U;
+static uint8_t g_node_upload_credit = 0U;
+/* Chunks still owed to an accepted NackRange. While non-zero the send cursor is
+ * owned by gap recovery and must not be dragged forward by an ACK_WINDOW. */
+static uint8_t g_node_upload_retx_remaining = 0U;
+static uint32_t g_node_upload_last_fail_log_ms = 0U;
+static uint32_t g_node_record_done_last_send_ms = 0U;
+static uint16_t g_node_record_done_retry_count = 0U;
+static volatile bool g_node_actuator_override_enabled = false;
+static volatile uint8_t g_node_rgb_mask = 0U;
+static exo::NodeUploadPump g_node_upload_pump;
+static uint32_t g_node_upload_seen_notification_complete_count = 0U;
+static uint32_t g_node_upload_seen_tx_pool_event_count = 0U;
+static uint32_t g_node_upload_seen_disconnect_count = 0U;
+static uint32_t g_node_upload_flash_read_ms = 0U;
+static uint32_t g_node_upload_diag_last_ms = 0U;
+/* PipeDataTx has one controller-owned notification lane. Live forwarding is
+ * released by the completion/TX-pool events (or the gate watchdog), and bursts
+ * into the TX pool so it is not capped at one sample per leaf connection event. */
+static exo::BleNotificationGate g_node_live_tx_gate;
+static uint32_t g_node_live_seen_notification_complete_count = 0U;
+static uint32_t g_node_live_seen_tx_pool_event_count = 0U;
+/* Marker byte for a bundled live frame: both sensors' latest sample in ONE
+ * PipeDataTx notification per tick, instead of one notification per sensor.
+ * Halves the node->master packet count (the shared-radio ceiling). Distinct
+ * from the legacy per-sensor path's payload[0] = sensor_id (1 or 2). */
+static constexpr uint8_t kNodeLiveBundleMarker = 0x03U;
+static_assert(kNodeLiveBundleMarker != 1U && kNodeLiveBundleMarker != 2U,
+		"bundle marker must not collide with a sensor_id");
+/* Live-stream forwarding telemetry, reported to the Master (SWO-free). */
+static uint32_t g_node_live_sent_count = 0U;
+static uint32_t g_node_live_gate_bp_count = 0U;
+static uint32_t g_node_live_bundle_next_ms = 0U;
+/* Last sample of each sensor, re-sent in a bundle when that sensor produced
+ * nothing fresh this tick so its stream stays at the bundle cadence (the BNO
+ * 100 Hz report jitters against the 40 ms tick and would otherwise drop ~10%).
+ * The Master re-stamps every forwarded frame with its own clock, so a repeated
+ * value still arrives as a fresh, monotonic sample at the host. */
+static uint32_t g_node_live_bno_fresh_count = 0U;
+static uint32_t g_node_live_icm_fresh_count = 0U;
+static exo::NodeRecordingApp::LiveSample g_node_live_last_bno{};
+static exo::NodeRecordingApp::LiveSample g_node_live_last_icm{};
+static bool g_node_live_last_bno_valid = false;
+static bool g_node_live_last_icm_valid = false;
+static uint32_t g_node_live_last_bno_ms = 0U;
+static uint32_t g_node_live_last_icm_ms = 0U;
+/* Stop repeating a sensor's last value once it has genuinely stalled - past
+ * this the stream should show a real gap, not stale data fed to the model. */
+static constexpr uint32_t kNodeLiveRepeatMaxAgeMs = 400U;
+
+extern "C" uint8_t Custom_APP_PipeDataNotifyEnabled(void);
+extern "C" uint8_t exo_node_ble_status_notify_enabled(void);
+
+static uint16_t node_blepipe_current_id()
+{
+#if EXO_NODE_FLASH_ENABLED
+	/* Cached in RAM: this is on the path of every BLE frame header and every
+	 * upload chunk, and it must never write to flash. */
+	return static_cast<uint16_t>(exo::node_runtime_config::current_node_id(EXO_NODE_ID));
+#else
+	return static_cast<uint16_t>(EXO_NODE_ID);
+#endif
+}
+
+static bool node_blepipe_send_with_status(Custom_STM_Char_Opcode_t char_opcode,
+		uint8_t msg_type,
+		uint16_t dst_id,
+		const uint8_t *payload,
+		uint16_t payload_len,
+		size_t *encoded_len_out,
+		tBleStatus *tx_status_out)
+{
+	uint8_t packet[BLEPIPE_MAX_NOTIFY_PAYLOAD];
+	size_t encoded_len = 0U;
+	blepipe_hdr_t hdr{};
+	hdr.proto_ver = BLEPIPE_PROTO_VER;
+	hdr.msg_type = msg_type;
+	hdr.flags = 0U;
+	hdr.hop_count = 0U;
+	hdr.src_id = node_blepipe_current_id();
+	hdr.dst_id = dst_id;
+	hdr.seq = g_node_blepipe_tx_seq++;
+	hdr.timestamp_ms = HAL_GetTick();
+	hdr.payload_len = payload_len;
+	const blepipe_status_t status = blepipe_encode(packet,
+			sizeof(packet),
+			&hdr,
+			payload,
+			payload_len,
+			&encoded_len);
+	if (encoded_len_out != nullptr) {
+		*encoded_len_out = encoded_len;
+	}
+	if (status != BLEPIPE_STATUS_OK || encoded_len > 255U) {
+		if (tx_status_out != nullptr) {
+			*tx_status_out = BLE_STATUS_INVALID_PARAMS;
+		}
+		EXO_LOG("[BLEPIPE][NODE] encode failed msg=0x%02X status=%u len=%u\r\n",
+				static_cast<unsigned>(msg_type),
+				static_cast<unsigned>(status),
+				static_cast<unsigned>(payload_len));
+		return false;
+	}
+	const tBleStatus tx_status = Custom_APP_SendPipeFrame(char_opcode,
+			packet,
+			static_cast<uint8_t>(encoded_len));
+	if (tx_status_out != nullptr) {
+		*tx_status_out = tx_status;
+	}
+	return tx_status == BLE_STATUS_SUCCESS;
+}
+
+static bool node_blepipe_send(Custom_STM_Char_Opcode_t char_opcode,
+		uint8_t msg_type,
+		uint16_t dst_id,
+		const uint8_t *payload,
+		uint16_t payload_len)
+{
+	return node_blepipe_send_with_status(char_opcode,
+			msg_type,
+			dst_id,
+			payload,
+			payload_len,
+			nullptr,
+			nullptr);
+}
+
+static void node_blepipe_process_live_samples()
+{
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+	const uint32_t now_ms = HAL_GetTick();
+	const uint32_t notification_complete_count = Custom_APP_NotificationCompleteCount();
+	if (notification_complete_count != g_node_live_seen_notification_complete_count) {
+		g_node_live_seen_notification_complete_count = notification_complete_count;
+		g_node_live_tx_gate.on_transport_available();
+	}
+	const uint32_t tx_pool_event_count = Custom_APP_TxPoolEventCount();
+	if (tx_pool_event_count != g_node_live_seen_tx_pool_event_count) {
+		g_node_live_seen_tx_pool_event_count = tx_pool_event_count;
+		g_node_live_tx_gate.on_transport_available();
+	}
+	if (!g_node_live_tx_gate.ready(now_ms)) {
+		return;
+	}
+	if (g_node_upload_pump.live_preview_suppressed()) {
+		return;
+	}
+	if (Custom_APP_PipeDataNotifyEnabled() == 0U) {
+		/* A disconnect/CCCD cycle can consume the old completion event while
+		 * the gate is closed. Re-arm before the next notification-enable event. */
+		g_node_live_tx_gate.reset();
+		g_node_live_bundle_next_ms = 0U;
+		return;
+	}
+
+	/* Paced bundle send: one PipeDataTx notification per live interval carrying
+	 * BOTH sensors' latest sample. Paced (not burst) so the leaf link is never
+	 * oversubscribed - at 25 Hz a bundle is ~0.5 packets per connection event.
+	 * Pace ~10% faster than the contract interval so a few % of leaf-link RF
+	 * loss still leaves the delivered rate above the 25 Hz gate. */
+	uint32_t interval_ms = node_recording_app.live_interval_ms();
+	interval_ms = (interval_ms * 9U) / 10U;
+	if (interval_ms < 18U) { interval_ms = 18U; }
+	if (g_node_live_bundle_next_ms != 0U &&
+			static_cast<int32_t>(now_ms - g_node_live_bundle_next_ms) < 0) {
+		return;
+	}
+
+	/* Drain the queue, refreshing the per-sensor last-known sample. */
+	exo::NodeRecordingApp::LiveSample s{};
+	bool bno_fresh = false;
+	bool icm_fresh = false;
+	for (uint8_t drained = 0U; drained < 24U && node_recording_app.pop_live_sample(s); ++drained) {
+		if (s.sensor_id == exo::NodeRecordingApp::kBnoLiveSensorId) {
+			g_node_live_last_bno = s;
+			g_node_live_last_bno_valid = true;
+			g_node_live_last_bno_ms = now_ms;
+			bno_fresh = true;
+			++g_node_live_bno_fresh_count;
+		} else if (s.sensor_id == exo::NodeRecordingApp::kIcmLiveSensorId) {
+			g_node_live_last_icm = s;
+			g_node_live_last_icm_valid = true;
+			g_node_live_last_icm_ms = now_ms;
+			icm_fresh = true;
+			++g_node_live_icm_fresh_count;
+		}
+	}
+	if (!bno_fresh && !icm_fresh) {
+		/* Nothing new from either sensor this tick; don't send a pure repeat.
+		 * Re-check in half an interval rather than a full one so the next real
+		 * sample goes out ~one CE sooner - a full-interval wait here turns a
+		 * momentarily empty queue into a ~2T gap in both streams. */
+		g_node_live_bundle_next_ms = now_ms + interval_ms / 2U;
+		return;
+	}
+
+	/* Include BOTH sensors (last-known if not fresh this tick) so neither
+	 * stream drops a grid point while the other keeps the cadence - unless a
+	 * sensor has genuinely stalled, then let its stream gap. */
+	const bool put_bno = g_node_live_last_bno_valid &&
+			(now_ms - g_node_live_last_bno_ms) < kNodeLiveRepeatMaxAgeMs;
+	const bool put_icm = g_node_live_last_icm_valid &&
+			(now_ms - g_node_live_last_icm_ms) < kNodeLiveRepeatMaxAgeMs;
+	if (!put_bno && !put_icm) {
+		g_node_live_bundle_next_ms = now_ms + interval_ms / 2U;
+		return;
+	}
+	uint8_t payload[3U + (2U * exo::NodeRecordingApp::kMaxLivePayload)]{};
+	uint16_t n = 0U;
+	payload[n++] = kNodeLiveBundleMarker;
+	payload[n++] = static_cast<uint8_t>(put_bno ? g_node_live_last_bno.payload_len : 0U);
+	if (put_bno) {
+		memcpy(payload + n, g_node_live_last_bno.payload, g_node_live_last_bno.payload_len);
+		n = static_cast<uint16_t>(n + g_node_live_last_bno.payload_len);
+	}
+	payload[n++] = static_cast<uint8_t>(put_icm ? g_node_live_last_icm.payload_len : 0U);
+	if (put_icm) {
+		memcpy(payload + n, g_node_live_last_icm.payload, g_node_live_last_icm.payload_len);
+		n = static_cast<uint16_t>(n + g_node_live_last_icm.payload_len);
+	}
+
+	tBleStatus tx_status = BLE_STATUS_INVALID_PARAMS;
+	if (node_blepipe_send_with_status(CUSTOM_STM_PIPEDATATX,
+			BLEPIPE_MSG_LEAF_SAMPLE, BLEPIPE_ID_HUB, payload, n, nullptr, &tx_status)) {
+		/* Count individual samples (not bundles) so it lines up with the
+		 * Master's per-sample rx counter. */
+		g_node_live_sent_count += (put_bno ? 1U : 0U) + (put_icm ? 1U : 0U);
+		g_node_live_tx_gate.on_send_accepted(now_ms);
+		g_node_live_bundle_next_ms = now_ms + interval_ms;
+	} else if (tx_status == BLE_STATUS_BUSY ||
+			tx_status == BLE_STATUS_INSUFFICIENT_RESOURCES) {
+		/* Bundle dropped (its samples were already the freshest); the next tick
+		 * carries even fresher data. The gate reopens on the controller event /
+		 * watchdog; retry after half an interval rather than a full one so a
+		 * single backpressure hit on the (often Degraded) leaf link does not
+		 * cost a whole 2T gap in the stream. */
+		g_node_live_tx_gate.on_backpressure(now_ms);
+		++g_node_live_gate_bp_count;
+		g_node_live_bundle_next_ms = now_ms + interval_ms / 2U;
+	} else {
+		g_node_live_tx_gate.on_other_failure();
+		g_node_live_bundle_next_ms = now_ms + interval_ms;
+	}
+#endif
+}
+
+static void node_blepipe_send_touch_status(uint8_t state)
+{
+	if (APP_BLE_Get_Server_Connection_Status() != APP_BLE_CONNECTED_SERVER ||
+			exo_node_ble_status_notify_enabled() == 0U) {
+		return;
+	}
+	const uint8_t payload[3] = {
+		kBlepipeStatusKindTouch,
+		static_cast<uint8_t>(node_blepipe_current_id()),
+		state
+	};
+	(void)node_blepipe_send(CUSTOM_STM_PIPESTATTX,
+			BLEPIPE_MSG_STATUS,
+			BLEPIPE_ID_HUB,
+			payload,
+			static_cast<uint16_t>(sizeof(payload)));
+}
+
+static void node_prepare_touch_wakeup_before_poweroff()
+{
+	LL_RCC_SetClkAfterWakeFromStop(LL_RCC_STOP_WAKEUPCLOCK_MSI);
+	LL_EXTI_DisableIT_32_63(LL_EXTI_LINE_48);
+	LL_C2_EXTI_DisableIT_32_63(LL_EXTI_LINE_48);
+	HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN4);
+	__HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
+	__HAL_PWR_CLEAR_FLAG(PWR_FLAG_SB);
+	HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN4_HIGH);
+}
+
+static void node_poweroff_pcb_and_wait_for_release()
+{
+	HAL_GPIO_WritePin(PWR_EN_GPIO_Port, PWR_EN_Pin, GPIO_PIN_RESET);
+	ERM_PWM.SET_PERCENT(0);
+	BUZZER.SET_PERCENT(0);
+	RGB.OFF();
+
+	while (HAL_GPIO_ReadPin(TOUCH_MCU_GPIO_Port, TOUCH_MCU_Pin) == GPIO_PIN_SET) {
+		HAL_Delay(10);
+	}
+	HAL_Delay(10000);
+
+	NVIC_SystemReset();
+}
+
+static void node_blepipe_send_ack(const blepipe_hdr_t &request_hdr, uint8_t accepted, uint8_t command_id)
+{
+	const uint8_t payload[2] = { command_id, accepted };
+	(void)node_blepipe_send(CUSTOM_STM_PIPECTRLTX,
+			accepted ? BLEPIPE_MSG_ACK : BLEPIPE_MSG_NACK,
+			request_hdr.src_id,
+			payload,
+			static_cast<uint16_t>(sizeof(payload)));
+}
+
+static void node_blepipe_send_response(const blepipe_hdr_t &request_hdr,
+		const uint8_t *payload,
+		uint16_t payload_len)
+{
+	(void)node_blepipe_send(CUSTOM_STM_PIPECTRLTX,
+			BLEPIPE_MSG_COMMAND_RESP,
+			request_hdr.src_id,
+			payload,
+			payload_len);
+}
+
+static bool node_blepipe_send_record_payload_with_status(const uint8_t *payload,
+		uint16_t payload_len,
+		size_t *encoded_len_out,
+		tBleStatus *tx_status_out)
+{
+	return node_blepipe_send_with_status(CUSTOM_STM_PIPEDATATX,
+			BLEPIPE_MSG_RAW_FORWARD,
+			BLEPIPE_ID_HUB,
+			payload,
+			payload_len,
+			encoded_len_out,
+			tx_status_out);
+}
+
+static bool node_blepipe_send_reliable_frame(exo::RecordReliableType type,
+		uint16_t source_id,
+		uint32_t session_id,
+		uint32_t chunk_index,
+		uint32_t byte_offset,
+		const uint8_t *payload,
+		uint16_t payload_len,
+		uint16_t flags = 0U,
+		size_t *encoded_len_out = nullptr,
+		tBleStatus *tx_status_out = nullptr)
+{
+	uint8_t packet[244];
+	exo::RecordReliableFrameHeader hdr{};
+	hdr.command = exo::RecordCommand::ReliableFrame;
+	hdr.proto_version = exo::kRecordReliableProtoVersion;
+	hdr.magic = exo::kRecordReliableMagic;
+	hdr.frame_type = static_cast<uint8_t>(type);
+	hdr.source_id = source_id;
+	hdr.session_id = session_id;
+	hdr.chunk_index = chunk_index;
+	hdr.byte_offset = byte_offset;
+	hdr.payload_len = payload_len;
+	hdr.payload_crc16 = blepipe_crc16_ccitt(payload, payload_len);
+	hdr.flags = flags;
+	const uint16_t total = static_cast<uint16_t>(sizeof(hdr) + payload_len);
+	/* The reliable frame is wrapped by the blepipe envelope (BLEPIPE_HDR_LEN +
+	 * BLEPIPE_CRC_LEN = 22 B, NOT sizeof(blepipe_hdr_t)=18) inside one
+	 * notification, so it must fit BLEPIPE_MAX_APP_PAYLOAD (= 244 - 22 = 222 B)
+	 * or blepipe_encode overflows MTU-3 and the stack silently drops it. */
+	if (total > BLEPIPE_MAX_APP_PAYLOAD) {
+		return false;
+	}
+	memcpy(packet, &hdr, sizeof(hdr));
+	if (payload != nullptr && payload_len > 0U) {
+		memcpy(packet + sizeof(hdr), payload, payload_len);
+	}
+	return node_blepipe_send_record_payload_with_status(packet,
+			total,
+			encoded_len_out,
+			tx_status_out);
+}
+
+static void node_blepipe_reset_upload_state()
+{
+	g_node_record_done_sent = false;
+	g_node_upload_active = false;
+	g_node_upload_session_id = 0U;
+	g_node_upload_total_size = 0U;
+	g_node_upload_crc32 = 0U;
+	g_node_upload_next_chunk = 0U;
+	g_node_upload_credit = 0U;
+	g_node_upload_retx_remaining = 0U;
+	g_node_upload_last_fail_log_ms = 0U;
+	g_node_record_done_last_send_ms = 0U;
+	g_node_record_done_retry_count = 0U;
+	g_node_upload_pump.stop();
+}
+
+/* An inbound control frame must never move the send cursor beyond the file:
+ * the sender treats offset >= total as "upload complete" and goes mute, so an
+ * unvalidated index from a malformed frame silently terminates the transfer. */
+static bool node_upload_chunk_index_valid(uint32_t chunk_index)
+{
+	if (g_node_upload_total_size == 0U || kNodeRecordChunkPayloadBytes == 0U) {
+		return false;
+	}
+	return chunk_index <= (g_node_upload_total_size - 1U) / static_cast<uint32_t>(kNodeRecordChunkPayloadBytes);
+}
+
+static bool node_blepipe_apply_legacy_chunk_ack(const uint8_t *payload, uint8_t length)
+{
+	if (payload == nullptr || length < sizeof(exo::ChunkAckMessage)) {
+		return false;
+	}
+
+	uint32_t session_id = 0U;
+	uint16_t source_id = 0U;
+	uint32_t next_offset = 0U;
+	if (length >= sizeof(exo::ChunkAckCompactSourceMessage) &&
+	    payload[1] == 4U) {
+		exo::ChunkAckCompactSourceMessage ack{};
+		memcpy(&ack, payload, sizeof(ack));
+		session_id = ack.session_id;
+		source_id = ack.source_id;
+		next_offset = ack.next_offset;
+	} else if (length >= sizeof(exo::ChunkAckCompactMessage) &&
+	           payload[1] == 4U) {
+		exo::ChunkAckCompactMessage ack{};
+		memcpy(&ack, payload, sizeof(ack));
+		session_id = ack.session_id;
+		next_offset = ack.next_offset;
+	} else if (length >= sizeof(exo::ChunkAckV3Message)) {
+		exo::ChunkAckV3Message ack{};
+		memcpy(&ack, payload, sizeof(ack));
+		session_id = ack.session_id;
+		source_id = ack.source_id;
+		next_offset = ack.next_offset;
+	} else if (length >= sizeof(exo::ChunkAckRangeMessage)) {
+		exo::ChunkAckRangeMessage ack{};
+		memcpy(&ack, payload, sizeof(ack));
+		session_id = ack.session_id;
+		next_offset = ack.next_offset;
+	} else {
+		exo::ChunkAckMessage ack{};
+		memcpy(&ack, payload, sizeof(ack));
+		session_id = ack.session_id;
+		next_offset = ack.next_offset;
+	}
+
+	if ((source_id != 0U && source_id != node_blepipe_current_id()) ||
+	    session_id != g_node_upload_session_id) {
+		return false;
+	}
+
+	const bool upload_ready = node_recording_app.session_ready() || node_recording_app.state() == exo::RecorderState::Uploading;
+	if (!upload_ready) {
+		return false;
+	}
+	if (node_recording_app.state() != exo::RecorderState::Uploading &&
+	    !node_recording_app.begin_upload()) {
+		return false;
+	}
+	if (g_node_upload_total_size == 0U) {
+		g_node_upload_total_size = node_recording_app.make_upload_reader().total_size();
+		g_node_upload_crc32 = node_recording_app.make_record_done().payload_crc32;
+	}
+	if (next_offset >= g_node_upload_total_size ||
+	    !node_upload_chunk_index_valid(next_offset / static_cast<uint32_t>(kNodeRecordChunkPayloadBytes))) {
+		EXO_LOG("[BLE][NODE][REC] legacy ChunkAck rejected out-of-range offset=%lu total=%lu\r\n",
+				static_cast<unsigned long>(next_offset),
+				static_cast<unsigned long>(g_node_upload_total_size));
+		return false;
+	}
+	g_node_upload_active = true;
+	g_node_upload_next_chunk = next_offset / static_cast<uint32_t>(kNodeRecordChunkPayloadBytes);
+	g_node_upload_credit = exo::kRecordReliableDefaultCredit;
+	/* A legacy ACK also releases a pending retransmit cursor, exactly like an
+	 * ACK_WINDOW would, so stale NackRange state cannot outlive its recovery. */
+	g_node_upload_retx_remaining = 0U;
+	return true;
+}
+
+static void node_upload_pump_sync(uint32_t now_ms)
+{
+	const uint32_t notification_complete_count = Custom_APP_NotificationCompleteCount();
+	if (notification_complete_count != g_node_upload_seen_notification_complete_count) {
+		const uint32_t delta = notification_complete_count - g_node_upload_seen_notification_complete_count;
+		g_node_upload_seen_notification_complete_count = notification_complete_count;
+		g_node_upload_pump.on_notification_complete(delta);
+	}
+	const uint32_t tx_pool_event_count = Custom_APP_TxPoolEventCount();
+	if (tx_pool_event_count != g_node_upload_seen_tx_pool_event_count) {
+		const uint32_t delta = tx_pool_event_count - g_node_upload_seen_tx_pool_event_count;
+		g_node_upload_seen_tx_pool_event_count = tx_pool_event_count;
+		g_node_upload_pump.on_tx_pool_available(Custom_APP_LastTxPoolBuffers(), delta);
+	}
+	const uint32_t disconnect_count = Custom_APP_DisconnectCount();
+	if (disconnect_count != g_node_upload_seen_disconnect_count) {
+		g_node_upload_seen_disconnect_count = disconnect_count;
+		/* Keep session/cursor data for a reconnect, but immediately stop the
+		 * foreground pump and allow live preview to resume. RecordDone is sent
+		 * again after reconnect so the Master can resume the same session. */
+		g_node_upload_active = false;
+		g_node_upload_credit = 0U;
+		g_node_record_done_sent = false;
+		g_node_record_done_last_send_ms = 0U;
+		g_node_upload_pump.stop();
+	}
+	if (!g_node_upload_active) {
+		if (g_node_upload_pump.active()) {
+			g_node_upload_pump.stop();
+		}
+		return;
+	}
+	if (!g_node_upload_pump.active()) {
+		g_node_upload_pump.start(now_ms, g_node_upload_credit);
+	} else if (g_node_upload_pump.credit() != g_node_upload_credit) {
+		/* Reliable ACK/NACK control is also an explicit foreground wake. */
+		g_node_upload_pump.set_credit(g_node_upload_credit);
+	}
+}
+
+static void node_blepipe_process_recording_upload()
+{
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+	const bool retained_uploading_session =
+		node_recording_app.state() == exo::RecorderState::Uploading;
+	if (exo::NodeUploadPump::record_done_eligible(node_recording_app.session_ready(),
+			retained_uploading_session, g_node_record_done_sent, g_node_upload_active) &&
+	    (g_node_record_done_last_send_ms == 0U ||
+	     (HAL_GetTick() - g_node_record_done_last_send_ms) >= kNodeRecordDoneRetryMs)) {
+		const exo::RecordDoneMessage done = node_recording_app.make_record_done();
+		size_t encoded_len = 0U;
+		tBleStatus tx_status = BLE_STATUS_INVALID_PARAMS;
+		const bool sent = node_blepipe_send_record_payload_with_status(reinterpret_cast<const uint8_t *>(&done),
+				static_cast<uint16_t>(sizeof(done)), &encoded_len, &tx_status);
+		g_node_record_done_last_send_ms = HAL_GetTick();
+		++g_node_record_done_retry_count;
+		if (sent) {
+			g_node_upload_session_id = done.session_id;
+			g_node_upload_total_size = done.total_size;
+			g_node_upload_crc32 = done.payload_crc32;
+		}
+		EXO_LOG("[BLE][NODE][REC] RecordDone send attempt=%u sent=%u status=0x%02X enc_len=%u data_notify=%u node=%u session=%lu size=%lu\r\n",
+				static_cast<unsigned>(g_node_record_done_retry_count), static_cast<unsigned>(sent ? 1U : 0U),
+				static_cast<unsigned>(tx_status), static_cast<unsigned>(encoded_len),
+				static_cast<unsigned>(Custom_APP_PipeDataNotifyEnabled()), static_cast<unsigned>(done.node_id),
+				static_cast<unsigned long>(done.session_id), static_cast<unsigned long>(done.total_size));
+	}
+
+	const uint32_t now = HAL_GetTick();
+	node_upload_pump_sync(now);
+	if (!g_node_upload_active || !g_node_upload_pump.ready(now)) {
+		return;
+	}
+
+	uint8_t burst_sent = 0U;
+	while (g_node_upload_active && g_node_upload_credit > 0U &&
+	       burst_sent < kNodeRecordForegroundBurstLimit && g_node_upload_pump.ready(HAL_GetTick())) {
+		const uint32_t offset = g_node_upload_next_chunk * static_cast<uint32_t>(kNodeRecordChunkPayloadBytes);
+		if (offset >= g_node_upload_total_size) {
+			g_node_upload_active = false;
+			g_node_upload_credit = 0U;
+			g_node_upload_retx_remaining = 0U;
+			g_node_upload_pump.stop();
+			return;
+		}
+
+		uint8_t chunk[kNodeRecordChunkPayloadBytes];
+		const uint32_t remaining = g_node_upload_total_size - offset;
+		const uint16_t chunk_size = static_cast<uint16_t>(remaining > kNodeRecordChunkPayloadBytes ?
+				kNodeRecordChunkPayloadBytes : remaining);
+		exo::SessionUploadReader reader = node_recording_app.make_upload_reader();
+		const uint32_t read_started_ms = HAL_GetTick();
+		if (!reader.read(offset, chunk, chunk_size)) {
+			g_node_upload_flash_read_ms += HAL_GetTick() - read_started_ms;
+			EXO_LOG("[BLE][NODE][REC] chunk read failed session=%lu off=%lu size=%u\r\n",
+					static_cast<unsigned long>(g_node_upload_session_id),
+					static_cast<unsigned long>(offset), static_cast<unsigned>(chunk_size));
+			return;
+		}
+		g_node_upload_flash_read_ms += HAL_GetTick() - read_started_ms;
+
+		size_t encoded_len = 0U;
+		tBleStatus tx_status = BLE_STATUS_INVALID_PARAMS;
+		if (!node_blepipe_send_reliable_frame(exo::RecordReliableType::Chunk,
+				static_cast<uint16_t>(node_blepipe_current_id()), g_node_upload_session_id,
+				g_node_upload_next_chunk, offset, chunk, chunk_size,
+				exo::record_reliable_chunk_flags(
+						(offset + chunk_size) >= g_node_upload_total_size,
+						g_node_upload_retx_remaining > 0U),
+				&encoded_len, &tx_status)) {
+			const exo::NodeUploadPump::SendResult result =
+					(tx_status == BLE_STATUS_BUSY) ? exo::NodeUploadPump::SendResult::Busy :
+					(tx_status == BLE_STATUS_INSUFFICIENT_RESOURCES) ? exo::NodeUploadPump::SendResult::InsufficientResources :
+					exo::NodeUploadPump::SendResult::OtherFailure;
+			g_node_upload_pump.on_send_result(result, HAL_GetTick());
+			if (g_node_upload_pump.terminal_error()) {
+				/* This is not a controller-backpressure condition. Preserve the
+				 * reliable upload cursor for reconnect/resume, but never watchdog
+				 * retry a parameter/security/stack failure. */
+				g_node_upload_active = false;
+				g_node_upload_credit = 0U;
+				g_node_record_done_sent = false;
+				g_node_record_done_last_send_ms = 0U;
+			}
+			const uint32_t failed_at_ms = HAL_GetTick();
+			if (g_node_upload_last_fail_log_ms == 0U ||
+			    (failed_at_ms - g_node_upload_last_fail_log_ms) >= kNodeRecordTxFailLogMs) {
+				g_node_upload_last_fail_log_ms = failed_at_ms;
+				EXO_LOG("[BLE][NODE][REC] chunk tx blocked session=%lu chunk=%lu off=%lu size=%u credit=%u enc_len=%u status=0x%02X\r\n",
+						static_cast<unsigned long>(g_node_upload_session_id),
+						static_cast<unsigned long>(g_node_upload_next_chunk), static_cast<unsigned long>(offset),
+						static_cast<unsigned>(chunk_size), static_cast<unsigned>(g_node_upload_credit),
+						static_cast<unsigned>(encoded_len), static_cast<unsigned>(tx_status));
+			}
+			return;
+		}
+		g_node_upload_pump.on_send_result(exo::NodeUploadPump::SendResult::Success, HAL_GetTick());
+		g_node_upload_pump.on_send_accepted(static_cast<uint16_t>(encoded_len));
+		++g_node_upload_next_chunk;
+		--g_node_upload_credit;
+		if (g_node_upload_retx_remaining > 0U) {
+			--g_node_upload_retx_remaining;
+		}
+		g_node_upload_last_fail_log_ms = 0U;
+		++burst_sent;
+	}
+#endif
+}
+
+struct __attribute__((packed)) NodeUploadLinkStats {
+	uint8_t version;
+	uint8_t dle_outcome; /* 0=unknown, 1=requested, 2=confirmed, 3=degraded, 4=failed */
+	uint8_t dle_request_status;
+	uint8_t upload_active;
+	uint8_t dle_attempts;
+	uint16_t controller_max_tx_octets;
+	uint16_t negotiated_tx_octets;
+	uint16_t negotiated_rx_octets;
+	uint16_t tx_pool_buffers;
+	uint32_t accepted_bytes;
+	uint32_t accepted_count;
+	uint32_t busy_count;
+	uint32_t resource_count;
+	uint32_t notification_complete_count;
+	uint32_t tx_pool_event_count;
+	uint32_t watchdog_wake_count;
+	uint32_t terminal_error_count;
+	uint32_t flash_read_ms;
+	/* Version-1 readers accept a longer payload and ignore this throughput
+	 * extension; new firmware logs it even with an older desktop tool. */
+	uint16_t max_tx_pool_buffers;
+	uint16_t consecutive_accepted_count;
+	uint16_t max_consecutive_accepted_count;
+	uint8_t configured_notification_buffers;
+	uint8_t foreground_burst_limit;
+	/* Continuation of the same version-1 payload (the desktop decoder keys on
+	 * the version byte, so the frame version never moves): CPU2 wireless
+	 * stack identity, auditable from the Master console without SWO. */
+	uint8_t fw_major;
+	uint8_t fw_minor;
+	uint8_t fw_sub;
+	uint8_t fw_build;
+	uint8_t fus_major;
+	uint8_t fus_minor;
+	uint8_t fus_sub;
+	uint8_t fw_reserved;
+	/* Version 2 tail: live-preview forwarding health, so the Master can show the
+	 * node->master leg on the web log with no SWO. All zero during an upload. */
+	uint32_t live_offered;   /* samples the live queue accepted (post-decimation) */
+	uint32_t live_dropped;   /* live-queue drop-oldest events (leaf link too slow) */
+	uint32_t live_sent;      /* LEAF_SAMPLE notifications the BLE stack accepted */
+	uint32_t live_gate_wdog; /* live tx-gate watchdog wakes */
+	uint32_t live_gate_bp;   /* live tx-gate backpressure events */
+	uint8_t live_stream_on;
+	uint8_t live_pad[3];
+	uint32_t live_bno_fresh; /* fresh BNO samples pulled from the live queue */
+	uint32_t live_icm_fresh; /* fresh ICM samples pulled from the live queue */
+};
+
+static void node_blepipe_report_upload_diagnostics()
+{
+	const uint32_t now_ms = HAL_GetTick();
+	if ((now_ms - g_node_upload_diag_last_ms) < 1000U) {
+		return;
+	}
+	g_node_upload_diag_last_ms = now_ms;
+	const exo_node_ble_dle_status_t dle = exo_node_ble_dle_status();
+	const exo::NodeUploadPump::Metrics &pump = g_node_upload_pump.metrics();
+	const uint8_t dle_outcome = dle.commission_state;
+	NodeUploadLinkStats status{};
+	status.dle_outcome = dle_outcome;
+	status.dle_request_status = dle.request_status;
+	status.upload_active = g_node_upload_pump.active() ? 1U : 0U;
+	status.dle_attempts = dle.commission_attempts;
+	status.controller_max_tx_octets = dle.controller_max_tx_octets;
+	status.negotiated_tx_octets = dle.negotiated_tx_octets;
+	status.negotiated_rx_octets = dle.negotiated_rx_octets;
+	status.tx_pool_buffers = pump.tx_pool_buffers;
+	status.accepted_bytes = pump.accepted_bytes;
+	status.accepted_count = pump.accepted_count;
+	status.busy_count = pump.busy_count;
+	status.resource_count = pump.resource_count;
+	status.notification_complete_count = pump.notification_complete_count;
+	status.tx_pool_event_count = pump.tx_pool_event_count;
+	status.watchdog_wake_count = pump.watchdog_wake_count;
+	status.terminal_error_count = pump.terminal_error_count;
+	status.flash_read_ms = g_node_upload_flash_read_ms;
+	status.max_tx_pool_buffers = pump.max_tx_pool_buffers;
+	status.consecutive_accepted_count = pump.consecutive_accepted_count;
+	status.max_consecutive_accepted_count = pump.max_consecutive_accepted_count;
+	status.configured_notification_buffers = CFG_NODE_UPLOAD_NOTIFICATION_BUFFERS;
+	status.foreground_burst_limit = kNodeRecordForegroundBurstLimit;
+	static WirelessFwInfo_t s_wireless_info {};
+	static bool s_wireless_info_valid = false;
+	if (!s_wireless_info_valid) {
+		SHCI_GetWirelessFwInfo(&s_wireless_info);
+		s_wireless_info_valid = true;
+	}
+	/* Frame version stays 1: the desktop decoder keys on it. New readers detect
+	 * the v2 live-preview tail by payload length. */
+	status.version = 1U;
+	status.live_offered = node_recording_app.live_accepted_count();
+	status.live_dropped = node_recording_app.live_drop_count();
+	status.live_sent = g_node_live_sent_count;
+	status.live_gate_wdog = g_node_live_tx_gate.watchdog_wake_count();
+	status.live_gate_bp = g_node_live_gate_bp_count;
+	status.live_stream_on = node_stream_enabled ? 1U : 0U;
+	status.live_pad[0] = 0U;
+	status.live_pad[1] = 0U;
+	status.live_pad[2] = 0U;
+	status.live_bno_fresh = g_node_live_bno_fresh_count;
+	status.live_icm_fresh = g_node_live_icm_fresh_count;
+	status.fw_major = s_wireless_info.VersionMajor;
+	status.fw_minor = s_wireless_info.VersionMinor;
+	status.fw_sub = s_wireless_info.VersionSub;
+	status.fw_build = s_wireless_info.VersionReleaseType;
+	status.fus_major = s_wireless_info.FusVersionMajor;
+	status.fus_minor = s_wireless_info.FusVersionMinor;
+	status.fus_sub = s_wireless_info.FusVersionSub;
+	status.fw_reserved = 0U;
+	const bool telemetry_sent = exo_node_ble_status_notify_enabled() != 0U &&
+		node_blepipe_send(CUSTOM_STM_PIPESTATTX, BLEPIPE_MSG_LINK_STATS, BLEPIPE_ID_HUB,
+			reinterpret_cast<const uint8_t *>(&status), static_cast<uint16_t>(sizeof(status)));
+	EXO_LOG("[BLE][NODE][UPLOAD] dle=%u attempts=%u req=0x%02X max=%u tx=%u rx=%u acceptedB=%lu accepted=%lu busy=%lu res=%lu complete=%lu pool=%lu/%u maxpool=%u streak=%u maxstreak=%u cfgbuf=%u burst=%u watchdog=%lu terminal=%lu flashMs=%lu telemetry=%u\r\n",
+			static_cast<unsigned>(dle_outcome), static_cast<unsigned>(dle.commission_attempts),
+			static_cast<unsigned>(dle.request_status),
+			static_cast<unsigned>(dle.controller_max_tx_octets), static_cast<unsigned>(dle.negotiated_tx_octets),
+			static_cast<unsigned>(dle.negotiated_rx_octets), static_cast<unsigned long>(pump.accepted_bytes),
+			static_cast<unsigned long>(pump.accepted_count), static_cast<unsigned long>(pump.busy_count),
+			static_cast<unsigned long>(pump.resource_count), static_cast<unsigned long>(pump.notification_complete_count),
+			static_cast<unsigned long>(pump.tx_pool_event_count), static_cast<unsigned>(pump.tx_pool_buffers),
+			static_cast<unsigned>(pump.max_tx_pool_buffers),
+			static_cast<unsigned>(pump.consecutive_accepted_count),
+			static_cast<unsigned>(pump.max_consecutive_accepted_count),
+			static_cast<unsigned>(CFG_NODE_UPLOAD_NOTIFICATION_BUFFERS),
+			static_cast<unsigned>(kNodeRecordForegroundBurstLimit),
+			static_cast<unsigned long>(pump.watchdog_wake_count), static_cast<unsigned long>(pump.terminal_error_count),
+			static_cast<unsigned long>(g_node_upload_flash_read_ms),
+			static_cast<unsigned>(telemetry_sent ? 1U : 0U));
+}
+
+static void node_blepipe_send_topology(const blepipe_hdr_t &request_hdr)
+{
+	const uint8_t current_id = static_cast<uint8_t>(node_blepipe_current_id());
+	const uint8_t payload[2] = { 1U, current_id };
+	(void)node_blepipe_send(CUSTOM_STM_PIPESTATTX,
+			BLEPIPE_MSG_TOPOLOGY,
+			request_hdr.src_id,
+			payload,
+			static_cast<uint16_t>(sizeof(payload)));
+}
+
+static void node_blepipe_send_stream_status(const blepipe_hdr_t &request_hdr,
+		uint8_t command_id)
+{
+	const uint8_t payload[4] = {
+		command_id,
+		static_cast<uint8_t>(node_blepipe_current_id()),
+		static_cast<uint8_t>(node_stream_enabled ? 1U : 0U),
+		node_stream_interval_ms
+	};
+	node_blepipe_send_response(request_hdr, payload, static_cast<uint16_t>(sizeof(payload)));
+}
+
+static bool node_blepipe_send_record_ready_status(bool force)
+{
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+	const uint32_t now_ms = HAL_GetTick();
+	const uint8_t notify_enabled = exo_node_ble_status_notify_enabled();
+	if (notify_enabled == 0U) {
+		g_node_record_ready_last_notify_enabled = 0U;
+		return false;
+	}
+	if (!force &&
+	    g_node_record_ready_last_notify_enabled != 0U &&
+	    (now_ms - g_node_record_ready_last_status_ms) < 1000U) {
+		return false;
+	}
+
+	blepipe_node_record_ready_status_t status{};
+	status.status_kind = BLEPIPE_STATUS_KIND_NODE_RECORD_READY;
+	status.node_id = static_cast<uint8_t>(node_blepipe_current_id());
+	status.recorder_state = static_cast<uint8_t>(node_recording_app.state());
+	status.record_ready = (node_recording_app.ready() &&
+			(node_recording_app.can_start_recording() ||
+			node_recording_app.state() == exo::RecorderState::Idle)) ? 1U : 0U;
+	status.session_id = node_recording_app.session_ready() ?
+			node_recording_app.make_record_done().session_id :
+			0U;
+	status.maximum_duration_ms = node_recording_app.maximum_duration_ms();
+
+	const bool sent = node_blepipe_send(CUSTOM_STM_PIPESTATTX,
+			BLEPIPE_MSG_STATUS,
+			BLEPIPE_ID_HUB,
+			reinterpret_cast<const uint8_t *>(&status),
+			static_cast<uint16_t>(sizeof(status)));
+	g_node_record_ready_last_status_ms = now_ms;
+	g_node_record_ready_last_notify_enabled = notify_enabled;
+	EXO_LOG("[BLE][NODE][READY] sent=%u ready=%u state=%u session=%lu\r\n",
+			static_cast<unsigned>(sent ? 1U : 0U),
+			static_cast<unsigned>(status.record_ready),
+			static_cast<unsigned>(status.recorder_state),
+			static_cast<unsigned long>(status.session_id));
+	return sent;
+#else
+	(void)force;
+	return false;
+#endif
+}
+
+static bool node_blepipe_send_record_start_heartbeat(uint8_t phase, uint32_t session_id, bool force)
+{
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+	const uint32_t now_ms = HAL_GetTick();
+	if (exo_node_ble_status_notify_enabled() == 0U) {
+		return false;
+	}
+	if (!force &&
+	    g_node_record_start_heartbeat_phase == phase &&
+	    (now_ms - g_node_record_start_heartbeat_last_ms) < 1000U) {
+		return false;
+	}
+	blepipe_record_start_heartbeat_status_t status{};
+	status.status_kind = BLEPIPE_STATUS_KIND_RECORD_START_HEARTBEAT;
+	status.phase = phase;
+	status.in_progress = 1U;
+	status.source_id = node_blepipe_current_id();
+	status.session_id = session_id;
+	status.extend_timeout_ms = 5000U;
+	const bool sent = node_blepipe_send(CUSTOM_STM_PIPESTATTX,
+			BLEPIPE_MSG_STATUS,
+			BLEPIPE_ID_HUB,
+			reinterpret_cast<const uint8_t *>(&status),
+			static_cast<uint16_t>(sizeof(status)));
+	g_node_record_start_heartbeat_phase = phase;
+	g_node_record_start_heartbeat_last_ms = now_ms;
+	EXO_LOG("[BLE][NODE][START_HB] sent=%u phase=%u session=%lu\r\n",
+			static_cast<unsigned>(sent ? 1U : 0U),
+			static_cast<unsigned>(phase),
+			static_cast<unsigned long>(session_id));
+	return sent;
+#else
+	(void)phase;
+	(void)session_id;
+	(void)force;
+	return false;
+#endif
+}
+
+static uint8_t node_clamp_u8(uint32_t value, uint8_t min_value, uint8_t max_value)
+{
+	if (value < min_value) {
+		return min_value;
+	}
+	if (value > max_value) {
+		return max_value;
+	}
+	return static_cast<uint8_t>(value);
+}
+
+static bool node_apply_actuator_command(const uint8_t *payload, uint16_t length)
+{
+	if (payload == nullptr || length < 2U) {
+		return false;
+	}
+	switch (payload[0]) {
+		case 0xA3U:
+			ERM_PWM.SET_PERCENT(node_clamp_u8(payload[1], 0U, 100U));
+			g_node_actuator_override_enabled = true;
+			EXO_LOG("[BLE][NODE][CTRL] ERM=%u%%\r\n", static_cast<unsigned>(node_clamp_u8(payload[1], 0U, 100U)));
+			return true;
+		case 0xA7U:
+		{
+			/* [0xA7][intensity%][dur_lo][dur_hi][evt b0..b3] */
+			if (length < 8U) {
+				return false;
+			}
+			exo::HapticPulseRequest request{};
+			request.intensity_percent = payload[1];
+			request.duration_ms = static_cast<uint16_t>(payload[2] | (payload[3] << 8));
+			request.event_id = static_cast<uint32_t>(payload[4]) |
+					(static_cast<uint32_t>(payload[5]) << 8) |
+					(static_cast<uint32_t>(payload[6]) << 16) |
+					(static_cast<uint32_t>(payload[7]) << 24);
+			const exo::HapticPulseResult result =
+					g_node_haptic_pulse.submit(request, HAL_GetTick());
+			if (result != exo::HapticPulseResult::Accepted) {
+				EXO_LOG("[BLE][NODE][CTRL] pulse rejected evt=%lu reason=%u\r\n",
+						static_cast<unsigned long>(request.event_id),
+						static_cast<unsigned>(result));
+				return false;
+			}
+			ERM_PWM.SET_PERCENT(g_node_haptic_pulse.intensity_percent());
+			g_node_actuator_override_enabled = true;
+			EXO_LOG("[BLE][NODE][CTRL] pulse evt=%lu %u%% %ums\r\n",
+					static_cast<unsigned long>(request.event_id),
+					static_cast<unsigned>(request.intensity_percent),
+					static_cast<unsigned>(request.duration_ms));
+			return true;
+		}
+		case 0xA4U:
+			BUZZER.SET_PERCENT(node_clamp_u8(payload[1], 0U, 99U));
+			g_node_actuator_override_enabled = true;
+			EXO_LOG("[BLE][NODE][CTRL] buzzer=%u%%\r\n", static_cast<unsigned>(node_clamp_u8(payload[1], 0U, 99U)));
+			return true;
+		case 0xA5U:
+			if ((payload[1] & 0x80U) != 0U) {
+				g_node_actuator_override_enabled = false;
+				/* Releasing the override ends any pulse in flight so active() never
+				 * reports a motor the Node is no longer driving. */
+				if (g_node_haptic_pulse.cancel()) {
+					ERM_PWM.SET_PERCENT(0U);
+				}
+				EXO_LOG("[BLE][NODE][CTRL] actuator override=OFF\r\n");
+				return true;
+			}
+			g_node_rgb_mask = static_cast<uint8_t>(payload[1] & 0x07U);
+			g_node_actuator_override_enabled = true;
+			RGB.SET((g_node_rgb_mask & 0x01U) != 0U,
+					(g_node_rgb_mask & 0x02U) != 0U,
+					(g_node_rgb_mask & 0x04U) != 0U);
+			EXO_LOG("[BLE][NODE][CTRL] RGB mask=0x%02X\r\n", static_cast<unsigned>(g_node_rgb_mask));
+			return true;
+		case 0xA6U:
+			if (payload[1] == 0U) {
+				g_node_actuator_override_enabled = true;
+				g_node_touch_test_active = true;
+				g_node_touch_test_until_ms = HAL_GetTick() + 500U;
+				BUZZER.SET_PERCENT(50);
+				RGB.SET(true, true, true);
+				node_blepipe_send_touch_status(kTouchStatusPressed);
+				EXO_LOG("[BLE][NODE][CTRL] touch test feedback\r\n");
+				return true;
+			}
+			if (payload[1] == 1U) {
+				g_node_actuator_override_enabled = true;
+				g_node_touch_test_active = false;
+				g_node_poweroff_test_pending = true;
+				g_node_poweroff_test_at_ms = HAL_GetTick() + 1000U;
+				ERM_PWM.SET_PERCENT(0);
+				BUZZER.SET_PERCENT(0);
+				RGB.SET(true, false, false);
+				node_blepipe_send_touch_status(kTouchStatusTurningOff);
+				EXO_LOG("[BLE][NODE][CTRL] poweroff test armed\r\n");
+				return true;
+			}
+			return false;
+		default:
+			return false;
+	}
+}
+
+static bool node_handle_blepipe_command(const blepipe_hdr_t &hdr,
+		const uint8_t *payload,
+		uint16_t length)
+{
+	if (payload == nullptr || length == 0U) {
+		EXO_LOG("[BLEPIPE][NODE][CMD] empty msg=0x%02X src=0x%04X dst=0x%04X\r\n",
+				static_cast<unsigned>(hdr.msg_type),
+				static_cast<unsigned>(hdr.src_id),
+				static_cast<unsigned>(hdr.dst_id));
+		node_blepipe_send_ack(hdr, 0U, 0U);
+		return false;
+	}
+	EXO_LOG("[BLEPIPE][NODE][CMD] msg=0x%02X cmd=0x%02X src=0x%04X dst=0x%04X len=%u node=%u\r\n",
+			static_cast<unsigned>(hdr.msg_type),
+			static_cast<unsigned>(payload[0]),
+			static_cast<unsigned>(hdr.src_id),
+			static_cast<unsigned>(hdr.dst_id),
+			static_cast<unsigned>(length),
+			static_cast<unsigned>(node_blepipe_current_id()));
+	switch (payload[0]) {
+	case 0xA0U:
+		if (length == 1U) {
+			node_stream_enabled = true;
+			g_node_live_tx_gate.reset();
+			g_node_live_bundle_next_ms = 0U;
+			g_node_live_sent_count = 0U;
+			g_node_live_gate_bp_count = 0U;
+			g_node_live_bno_fresh_count = 0U;
+			g_node_live_icm_fresh_count = 0U;
+			g_node_live_last_bno_valid = false;
+			g_node_live_last_icm_valid = false;
+			g_node_live_last_bno_ms = 0U;
+			g_node_live_last_icm_ms = 0U;
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+			node_recording_app.set_live_stream_enabled(true);
+#endif
+			node_blepipe_send_stream_status(hdr, payload[0]);
+			node_blepipe_send_ack(hdr, 1U, payload[0]);
+			return true;
+		}
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case 0xA1U:
+		if (length == 1U) {
+			node_stream_enabled = false;
+			g_node_live_tx_gate.reset();
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+			node_recording_app.set_live_stream_enabled(false);
+#endif
+			node_blepipe_send_stream_status(hdr, payload[0]);
+			node_blepipe_send_ack(hdr, 1U, payload[0]);
+			return true;
+		}
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case 0xA2U:
+		if (length >= 2U) {
+			node_stream_interval_ms = payload[1] == 0U ? 1U : payload[1];
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+			node_recording_app.set_live_interval_ms(payload[1]);
+#endif
+			node_blepipe_send_stream_status(hdr, payload[0]);
+			node_blepipe_send_ack(hdr, 1U, payload[0]);
+			return true;
+		}
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case 0xA3U:
+	case 0xA4U:
+	case 0xA5U:
+	case 0xA6U:
+	case 0xA7U:
+	{
+		const bool ok = node_apply_actuator_command(payload, length);
+		node_blepipe_send_ack(hdr, ok ? 1U : 0U, payload[0]);
+		return ok;
+	}
+	case static_cast<uint8_t>(exo::RecordCommand::StartRecord):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (length == sizeof(exo::StartRecordMessage)) {
+			exo::StartRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			EXO_LOG("[BLE][NODE][START] session=%lu lead_us=%lu duration_ms=%lu\r\n",
+					static_cast<unsigned long>(message.session_id),
+					static_cast<unsigned long>(message.start_timestamp_us),
+					static_cast<unsigned long>(message.requested_duration_ms));
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_PREPARE, message.session_id, true);
+			node_blepipe_reset_upload_state();
+			const uint8_t ok = node_recording_app.start_recording(message) ? 1U : 0U;
+			EXO_LOG("[BLE][NODE][START] result=%u state=%u\r\n",
+					static_cast<unsigned>(ok),
+					static_cast<unsigned>(node_recording_app.state()));
+			(void)node_blepipe_send_record_ready_status(true);
+			node_blepipe_send_ack(hdr, ok, payload[0]);
+			return ok != 0U;
+		}
+		EXO_LOG("[BLE][NODE][START] bad len=%u expect=%u\r\n",
+				static_cast<unsigned>(length),
+				static_cast<unsigned>(sizeof(exo::StartRecordMessage)));
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case static_cast<uint8_t>(exo::RecordCommand::PrepareRecord):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (length == sizeof(exo::StartRecordMessage)) {
+			exo::StartRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			EXO_LOG("[BLE][NODE][PREP] session=%lu lead_us=%lu duration_ms=%lu\r\n",
+					static_cast<unsigned long>(message.session_id),
+					static_cast<unsigned long>(message.start_timestamp_us),
+					static_cast<unsigned long>(message.requested_duration_ms));
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_PREPARE, message.session_id, true);
+			node_blepipe_reset_upload_state();
+			const uint8_t ok = node_recording_app.prepare_recording(message) ? 1U : 0U;
+			EXO_LOG("[BLE][NODE][PREP] result=%u state=%u\r\n",
+					static_cast<unsigned>(ok),
+					static_cast<unsigned>(node_recording_app.state()));
+			(void)node_blepipe_send_record_ready_status(true);
+			node_blepipe_send_ack(hdr, ok, payload[0]);
+			return ok != 0U;
+		}
+		EXO_LOG("[BLE][NODE][PREP] bad len=%u expect=%u\r\n",
+				static_cast<unsigned>(length),
+				static_cast<unsigned>(sizeof(exo::StartRecordMessage)));
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case static_cast<uint8_t>(exo::RecordCommand::CommitPreparedRecord):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (length == sizeof(exo::StartRecordMessage)) {
+			exo::StartRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_COMMIT, message.session_id, true);
+			const uint8_t ok = node_recording_app.commit_prepared_recording(message) ? 1U : 0U;
+			EXO_LOG("[BLE][NODE][COMMIT] session=%lu result=%u state=%u\r\n",
+					static_cast<unsigned long>(message.session_id),
+					static_cast<unsigned>(ok),
+					static_cast<unsigned>(node_recording_app.state()));
+			(void)node_blepipe_send_record_ready_status(true);
+			node_blepipe_send_ack(hdr, ok, payload[0]);
+			return ok != 0U;
+		}
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case static_cast<uint8_t>(exo::RecordCommand::AbortPreparedRecord):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_ABORT, 0U, true);
+		node_recording_app.abort_prepared_recording();
+		node_blepipe_reset_upload_state();
+		EXO_LOG("[BLE][NODE][ABORT_PREP]\r\n");
+		(void)node_blepipe_send_record_ready_status(true);
+		node_blepipe_send_ack(hdr, 1U, payload[0]);
+		return true;
+#else
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+#endif
+	case static_cast<uint8_t>(exo::RecordCommand::StopRecord):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (length == sizeof(exo::StopRecordMessage)) {
+			exo::StopRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			const uint8_t state_before = static_cast<uint8_t>(node_recording_app.state());
+			const uint8_t ok = node_recording_app.stop_recording(message) ? 1U : 0U;
+			node_blepipe_send_ack(hdr, ok, payload[0]);
+			EXO_LOG("[BLE][NODE][STOP] session=%lu result=%u state_before=%u state_after=%u\r\n",
+					static_cast<unsigned long>(message.session_id),
+					static_cast<unsigned>(ok),
+					static_cast<unsigned>(state_before),
+					static_cast<unsigned>(node_recording_app.state()));
+			return ok != 0U;
+		}
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case static_cast<uint8_t>(exo::RecordCommand::SessionCompleteAck):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (length == sizeof(exo::SessionCompleteAckMessage)) {
+			const uint8_t ok = (node_recording_app.transfer_complete() && node_recording_app.acknowledge_and_erase()) ? 1U : 0U;
+			if (ok != 0U) {
+				node_blepipe_reset_upload_state();
+			}
+			(void)node_blepipe_send_record_ready_status(true);
+			node_blepipe_send_ack(hdr, ok, payload[0]);
+			return ok != 0U;
+		}
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case static_cast<uint8_t>(exo::RecordCommand::ChunkAck):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (node_blepipe_apply_legacy_chunk_ack(payload, length)) {
+			node_blepipe_send_ack(hdr, 1U, payload[0]);
+			return true;
+		}
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case 0xB3U:
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (length == 1U) {
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_RESET, 0U, true);
+			const uint8_t ok = node_recording_app.reset_to_idle_and_erase() ? 1U : 0U;
+			if (ok != 0U) {
+				node_blepipe_reset_upload_state();
+			}
+			(void)node_blepipe_send_record_ready_status(true);
+			node_blepipe_send_ack(hdr, ok, payload[0]);
+			return ok != 0U;
+		}
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case 0xB0U:
+		if (length >= 2U) {
+			const uint8_t requested_id = payload[1];
+			/* Decode payload[1] exactly like the legacy lane: a frame with
+			 * trailing bytes must not set a different id depending on lane. */
+			const uint8_t new_id = payload[1];
+			if (!exo::node_runtime_config::is_valid_node_id(new_id) ||
+			    !exo::node_runtime_config::store_node_id(new_id)) {
+				node_blepipe_send_ack(hdr, 0U, payload[0]);
+				return false;
+			}
+#if EXO_NODE_FLASH_ENABLED
+			node_recording_app.set_node_id(new_id);
+#endif
+			const uint8_t response[4] = { 0xB0U, requested_id, new_id, 1U };
+			node_blepipe_send_response(hdr, response, static_cast<uint16_t>(sizeof(response)));
+			node_blepipe_send_ack(hdr, 1U, payload[0]);
+			return true;
+		}
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	case 0xB1U:
+	{
+		const uint8_t current_id = static_cast<uint8_t>(node_blepipe_current_id());
+		const uint8_t target_id = length >= 2U ? payload[1] : current_id;
+		const uint8_t response[4] = { 0xB1U, target_id, current_id, 1U };
+		node_blepipe_send_response(hdr, response, static_cast<uint16_t>(sizeof(response)));
+		node_blepipe_send_ack(hdr, 1U, payload[0]);
+		return true;
+	}
+	case 0xB2U:
+		node_blepipe_send_topology(hdr);
+		node_blepipe_send_ack(hdr, 1U, payload[0]);
+		return true;
+	case 0xB4U:
+		node_blepipe_send_topology(hdr);
+		node_blepipe_send_ack(hdr, 1U, payload[0]);
+		return true;
+	case static_cast<uint8_t>(exo::RecordCommand::ReliableFrame):
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		if (length >= sizeof(exo::RecordReliableFrameHeader)) {
+			exo::RecordReliableFrameHeader rel{};
+			memcpy(&rel, payload, sizeof(rel));
+			if (rel.proto_version != exo::kRecordReliableProtoVersion ||
+			    rel.magic != exo::kRecordReliableMagic ||
+			    (sizeof(rel) + rel.payload_len) > length) {
+				node_blepipe_send_ack(hdr, 0U, payload[0]);
+				return false;
+			}
+			const uint8_t *body = payload + sizeof(rel);
+			const exo::RecordReliableType type = static_cast<exo::RecordReliableType>(rel.frame_type);
+			switch (type) {
+			case exo::RecordReliableType::ManifestAck:
+				if (rel.payload_len >= sizeof(exo::RecordReliableManifestAckPayload)) {
+					exo::RecordReliableManifestAckPayload ack{};
+					memcpy(&ack, body, sizeof(ack));
+					const bool upload_ready = node_recording_app.session_ready() || node_recording_app.state() == exo::RecorderState::Uploading;
+					if (ack.source_id == node_blepipe_current_id() &&
+					    upload_ready &&
+					    (node_recording_app.state() == exo::RecorderState::Uploading || node_recording_app.begin_upload())) {
+						const bool same_active_session = g_node_upload_active &&
+								g_node_upload_session_id == ack.session_id &&
+								g_node_upload_total_size != 0U;
+						g_node_upload_active = true;
+						g_node_upload_session_id = ack.session_id;
+						g_node_upload_total_size = node_recording_app.make_upload_reader().total_size();
+						g_node_upload_crc32 = node_recording_app.make_record_done().payload_crc32;
+						if (!same_active_session) {
+							g_node_upload_next_chunk = 0U;
+							g_node_upload_last_fail_log_ms = 0U;
+						}
+						g_node_upload_retx_remaining = 0U;
+						g_node_upload_credit = ack.credit == 0U ? exo::kRecordReliableDefaultCredit : ack.credit;
+						g_node_record_done_sent = true;
+						EXO_LOG("[BLE][NODE][REC] ManifestAck source=%u session=%lu credit=%u next=%lu active=%u start upload\r\n",
+								static_cast<unsigned>(ack.source_id),
+								static_cast<unsigned long>(ack.session_id),
+								static_cast<unsigned>(g_node_upload_credit),
+								static_cast<unsigned long>(g_node_upload_next_chunk),
+								static_cast<unsigned>(same_active_session ? 1U : 0U));
+						node_blepipe_send_ack(hdr, 1U, payload[0]);
+						return true;
+					}
+				}
+				break;
+			case exo::RecordReliableType::AckWindow:
+				if (rel.payload_len >= sizeof(exo::RecordReliableAckWindowPayload)) {
+					exo::RecordReliableAckWindowPayload ack{};
+					memcpy(&ack, body, sizeof(ack));
+					if (ack.source_id == node_blepipe_current_id() &&
+					    ack.session_id == g_node_upload_session_id) {
+						g_node_upload_active = true;
+						/* ACK_WINDOW also doubles as a periodic progress heartbeat from the
+						 * app (bypass=1), reporting its contiguous-received count. Because
+						 * this node bursts ahead using its granted credit without waiting
+						 * for each chunk to be confirmed, next_chunk_index is expected to
+						 * trail behind our own send cursor most of the time. Only use it to
+						 * move forward (skip-ahead) or to refresh credit; never rewind here
+						 * on a stale/behind value, or every heartbeat would needlessly
+						 * re-send chunks that already went out. Genuine gap recovery is
+						 * handled explicitly via NackRange below.
+						 *
+						 * While a NackRange is still being serviced the send cursor belongs
+						 * to gap recovery. An ACK_WINDOW generated before that NACK was
+						 * handled would otherwise drag the cursor forward again and the
+						 * requested chunks would never be retransmitted. */
+						if (g_node_upload_retx_remaining == 0U &&
+						    ack.next_chunk_index > g_node_upload_next_chunk) {
+							g_node_upload_next_chunk = ack.next_chunk_index;
+						}
+						g_node_upload_credit = ack.credit == 0U ? exo::kRecordReliableDefaultCredit : ack.credit;
+						g_node_record_done_sent = true;
+						node_blepipe_send_ack(hdr, 1U, payload[0]);
+						return true;
+					}
+				}
+				break;
+			case exo::RecordReliableType::NackRange:
+				if (rel.payload_len >= 12U) {
+					const uint16_t source_id = static_cast<uint16_t>(body[0] | (static_cast<uint16_t>(body[1]) << 8U));
+					const uint32_t session_id = static_cast<uint32_t>(body[2]) |
+							(static_cast<uint32_t>(body[3]) << 8U) |
+							(static_cast<uint32_t>(body[4]) << 16U) |
+							(static_cast<uint32_t>(body[5]) << 24U);
+					const uint32_t first_chunk = static_cast<uint32_t>(body[6]) |
+							(static_cast<uint32_t>(body[7]) << 8U) |
+							(static_cast<uint32_t>(body[8]) << 16U) |
+							(static_cast<uint32_t>(body[9]) << 24U);
+					const uint16_t chunk_count = static_cast<uint16_t>(body[10] | (static_cast<uint16_t>(body[11]) << 8U));
+					if (source_id == node_blepipe_current_id() &&
+					    session_id == g_node_upload_session_id) {
+						if (!node_upload_chunk_index_valid(first_chunk)) {
+							/* A malformed/hostile index must not silently end the
+							 * upload (out-of-range cursor makes the sender mute). */
+							EXO_LOG("[BLE][NODE][REC] NackRange rejected out-of-range chunk=%lu total=%lu\r\n",
+									static_cast<unsigned long>(first_chunk),
+									static_cast<unsigned long>(g_node_upload_total_size));
+							node_blepipe_send_ack(hdr, 0U, payload[0]);
+							return true;
+						}
+						g_node_upload_active = true;
+						g_node_upload_next_chunk = first_chunk;
+						g_node_upload_credit = chunk_count == 0U ? 1U :
+								static_cast<uint8_t>(chunk_count > exo::kRecordReliableDefaultCredit ?
+										exo::kRecordReliableDefaultCredit : chunk_count);
+						/* Own the send cursor until every requested chunk has gone out, so a
+						 * stale ACK_WINDOW cannot cancel the retransmit. */
+						g_node_upload_retx_remaining = g_node_upload_credit;
+						g_node_upload_last_fail_log_ms = 0U;
+						g_node_record_done_sent = true;
+						EXO_LOG("[BLE][NODE][REC] NackRange source=%u session=%lu first=%lu count=%u credit=%u\r\n",
+								static_cast<unsigned>(source_id),
+								static_cast<unsigned long>(session_id),
+								static_cast<unsigned long>(first_chunk),
+								static_cast<unsigned>(chunk_count),
+								static_cast<unsigned>(g_node_upload_credit));
+						node_blepipe_send_ack(hdr, 1U, payload[0]);
+						return true;
+					}
+				}
+				break;
+			case exo::RecordReliableType::Pause:
+				g_node_upload_active = false;
+				node_blepipe_send_ack(hdr, 1U, payload[0]);
+				return true;
+			case exo::RecordReliableType::Resume:
+				if (rel.source_id == node_blepipe_current_id() &&
+				    rel.session_id == g_node_upload_session_id) {
+					g_node_upload_active = true;
+					if (g_node_upload_credit == 0U) {
+						g_node_upload_credit = exo::kRecordReliableDefaultCredit;
+					}
+					node_blepipe_send_ack(hdr, 1U, payload[0]);
+					return true;
+				}
+				break;
+			case exo::RecordReliableType::Cancel:
+				if (node_recording_app.reset_to_idle_and_erase()) {
+					node_blepipe_reset_upload_state();
+					node_blepipe_send_ack(hdr, 1U, payload[0]);
+					return true;
+				}
+				break;
+			case exo::RecordReliableType::VerifyOk:
+				if (rel.payload_len >= sizeof(exo::RecordReliableVerifyPayload)) {
+					exo::RecordReliableVerifyPayload verify{};
+					memcpy(&verify, body, sizeof(verify));
+					if (verify.source_id == node_blepipe_current_id() &&
+					    verify.session_id == g_node_upload_session_id &&
+					    verify.file_crc32 == g_node_upload_crc32 &&
+					    node_recording_app.transfer_complete() &&
+					    node_recording_app.acknowledge_and_erase()) {
+						node_blepipe_reset_upload_state();
+						node_blepipe_send_ack(hdr, 1U, payload[0]);
+						return true;
+					}
+				}
+				break;
+			case exo::RecordReliableType::VerifyFail:
+				if (rel.source_id == node_blepipe_current_id() &&
+				    rel.session_id == g_node_upload_session_id) {
+					if (!node_upload_chunk_index_valid(rel.chunk_index)) {
+						EXO_LOG("[BLE][NODE][REC] VerifyFail rejected out-of-range chunk=%lu total=%lu\r\n",
+								static_cast<unsigned long>(rel.chunk_index),
+								static_cast<unsigned long>(g_node_upload_total_size));
+						node_blepipe_send_ack(hdr, 0U, payload[0]);
+						return true;
+					}
+					g_node_upload_active = true;
+					g_node_upload_next_chunk = rel.chunk_index;
+					g_node_upload_credit = 1U;
+					g_node_upload_retx_remaining = 1U;
+					node_blepipe_send_ack(hdr, 1U, payload[0]);
+					return true;
+				}
+				break;
+			case exo::RecordReliableType::CommitDone:
+				if (rel.source_id == node_blepipe_current_id() &&
+				    rel.session_id == g_node_upload_session_id) {
+					if (!node_recording_app.transfer_complete()) {
+						EXO_LOG("[BLE][NODE][REC] CommitDone early ignored source=%u session=%lu next=%lu credit=%u\r\n",
+								static_cast<unsigned>(rel.source_id),
+								static_cast<unsigned long>(rel.session_id),
+								static_cast<unsigned long>(g_node_upload_next_chunk),
+								static_cast<unsigned>(g_node_upload_credit));
+						node_blepipe_send_ack(hdr, 1U, payload[0]);
+						return true;
+					}
+					node_blepipe_reset_upload_state();
+					node_blepipe_send_ack(hdr, 1U, payload[0]);
+					return true;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+#endif
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	default:
+		node_blepipe_send_ack(hdr, 0U, payload[0]);
+		return false;
+	}
+}
+
+#if EXO_PROFILE_DIAG
+static uint8_t I2C_ScanBus(I2C_HandleTypeDef *hi2c)
+{
+	uint8_t count = 0;
+
+	for (uint16_t address = 1U; address < 129; ++address)
+			{
+		uint8_t pData[20] = { 0 };
+		if (HAL_I2C_Master_Receive(hi2c, (uint16_t) (address << 1), pData, 20, 20) == HAL_OK)
+				{
+			EXO_LOG("I2C%d device at address 0x%02X responded with data: ", (hi2c == &hi2c1 ? 1 : 3), address);
+			for (int i = 0; i < 20; ++i)
+					{
+				EXO_LOG("%02X ", pData[i]);
+			}
+			EXO_LOG("\r\n");
+			++count;
+		}
+		HAL_Delay(20);
+	}
+
+	return count;
+}
+
+static const char* I2cReadyStr(HAL_StatusTypeDef status)
+		{
+	switch (status) {
+	case HAL_OK:
+		return "ready";
+	case HAL_BUSY:
+		return "busy";
+	case HAL_TIMEOUT:
+		return "timeout";
+	case HAL_ERROR:
+	default:
+		return "error";
+	}
+}
+#endif
+
+static uint32_t SpiNextFasterPrescaler(uint32_t current)
+{
+	switch (current) {
+		case SPI_BAUDRATEPRESCALER_256: return SPI_BAUDRATEPRESCALER_128;
+		case SPI_BAUDRATEPRESCALER_128: return SPI_BAUDRATEPRESCALER_64;
+		case SPI_BAUDRATEPRESCALER_64: return SPI_BAUDRATEPRESCALER_32;
+		case SPI_BAUDRATEPRESCALER_32: return SPI_BAUDRATEPRESCALER_16;
+		case SPI_BAUDRATEPRESCALER_16: return SPI_BAUDRATEPRESCALER_8;
+		case SPI_BAUDRATEPRESCALER_8: return SPI_BAUDRATEPRESCALER_4;
+		case SPI_BAUDRATEPRESCALER_4: return SPI_BAUDRATEPRESCALER_2;
+		default: return current;
+	}
+}
+
+#if EXO_PROFILE_DIAG
+static HAL_StatusTypeDef I2C1_RecoverAndProbe(uint16_t addr7bit)
+{
+	HAL_StatusTypeDef status = HAL_I2C_IsDeviceReady(&hi2c1, (addr7bit << 1U), 2U, 20U);
+	if (status != HAL_BUSY) {
+		return status;
+	}
+
+	(void)HAL_I2C_DeInit(&hi2c1);
+	HAL_Delay(2);
+	MX_I2C1_Init();
+	HAL_Delay(2);
+	return HAL_I2C_IsDeviceReady(&hi2c1, (addr7bit << 1U), 2U, 20U);
+}
+#endif
+
+#if EXO_NODE_FLASH_ENABLED
+static bool NodeFlashRead(uint32_t address, void *data, uint32_t size)
+{
+	return node_recording_app.flash_read_raw(address, data, size);
+}
+
+static bool NodeFlashWrite(uint32_t address, const void *data, uint32_t size)
+{
+	return node_recording_app.flash_write_raw(address, data, size);
+}
+
+static bool NodeFlashErase(uint32_t address, uint32_t size)
+{
+	return node_recording_app.flash_erase_raw(address, size);
+}
+#endif
+
+#if EXO_NODE_FLASH_ENABLED && (EXO_NODE_FLASH_TEST_BOOT_ENABLE || EXO_NODE_FLASH_TEST_API_ENABLE)
+static void PrintHexBlock(const char *label, const uint8_t *data, uint32_t len)
+{
+	EXO_LOG("%s", label);
+	for (uint32_t i = 0U; i < len; ++i)
+	{
+		if ((i % 16U) == 0U)
+		{
+			EXO_LOG("\r\n%03lu: ", i);
+		}
+		EXO_LOG("%02X ", data[i]);
+	}
+	EXO_LOG("\r\n");
+}
+
+static uint8_t RunFlashTest128()
+{
+	/* The self-test erases its target sector, so it must never run inside the
+	 * session region: use the reserved recovery sector, which the background
+	 * eraser always re-erases before the next session's headers are written. */
+	const uint32_t test_address = node_recording_app.recovery_sector_address();
+	if (test_address == 0U)
+	{
+		EXO_LOG("W25Q 128B test skipped: flash not initialised\r\n");
+		return 0U;
+	}
+	const uint32_t seed = HAL_GetTick() ^ 0x1A2B3C4DU;
+	uint16_t mismatch_count = 0U;
+	uint16_t first_mismatch_index = 0xFFFFU;
+	uint8_t written[128] = {0U};
+	uint8_t readback[128] = {0U};
+	uint8_t manufacturer = 0U;
+	uint8_t device_id_hi = 0U;
+	uint8_t device_id_lo = 0U;
+
+	if (!node_recording_app.flash_get_jedec(manufacturer, device_id_hi, device_id_lo))
+	{
+		EXO_LOG("W25Q JEDEC read failed\r\n");
+		return 2U;
+	}
+	EXO_LOG("W25Q JEDEC: %02X %02X %02X\r\n", manufacturer, device_id_hi, device_id_lo);
+
+	const bool ok = node_recording_app.flash_self_test_128(test_address, seed, mismatch_count, first_mismatch_index, written, readback);
+	PrintHexBlock("W25Q written(128B):", written, sizeof(written));
+	PrintHexBlock("W25Q read(128B):", readback, sizeof(readback));
+	if (ok)
+	{
+		EXO_LOG("W25Q 128B test PASS addr=0x%08lX\r\n", test_address);
+		return 0U;
+	}
+	const exo::W25Q256Flash::DebugInfo info = node_recording_app.flash_debug_info();
+
+	EXO_LOG("W25Q 128B test FAIL addr=0x%08lX mismatch_count=%u first_idx=%u\r\n",
+			test_address, mismatch_count, first_mismatch_index);
+	EXO_LOG("W25Q dbg: err=%s drv=%u jedec=%02X %02X %02X spi_cmd=0x%02X hal=%u hdr=%lu\r\n",
+			node_recording_app.flash_last_error_string(),
+			info.last_driver_result,
+			info.jedec_manufacturer,
+			info.jedec_device_hi,
+			info.jedec_device_lo,
+			info.last_spi_instruction,
+			info.last_hal_status,
+			info.last_header_len);
+	return 1U;
+}
+#endif
+
+#if EXO_NODE_FLASH_ENABLED && EXO_NODE_FLASH_TEST_API_ENABLE
+extern "C" uint8_t exo_node_flash_test_128b(void)
+{
+	return RunFlashTest128();
+}
+#endif
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+  /* Config code for STM32_WPAN (HSE Tuning must be done before system clock configuration) */
+  MX_APPE_Config();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* Configure the peripherals common clocks */
+  PeriphCommonClock_Config();
+
+  /* IPCC initialisation */
+  MX_IPCC_Init();
+
+  /* USER CODE BEGIN SysInit */
+  NodeSwo_Init(HAL_RCC_GetHCLKFreq(), 2000000U);
+  NodeSwo_Logf("[SWO][NODE] boot hclk=%lu swo=%lu\r\n",
+		  static_cast<unsigned long>(HAL_RCC_GetHCLKFreq()),
+		  2000000UL);
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_RTC_Init();
+  MX_ADC1_Init();
+  MX_I2C1_Init();
+  MX_I2C3_Init();
+  MX_LPUART1_UART_Init();
+  MX_USART1_UART_Init();
+  MX_SPI1_Init();
+  MX_TIM1_Init();
+  MX_RF_Init();
+	/* USER CODE BEGIN 2 */
+	{
+		const uint32_t old_prescaler = hspi1.Init.BaudRatePrescaler;
+		/* Two steps above the Cube default: /16 -> /4 = 8 MHz. The W25Q256
+		 * normal-mode SPI rating is far higher, and every recorded batch pays
+		 * a full 4 KB sector read in the driver's read-modify-write path, so
+		 * the flash bus is the node's write-throughput bottleneck. */
+		const uint32_t new_prescaler = SpiNextFasterPrescaler(
+				SpiNextFasterPrescaler(old_prescaler));
+		if (new_prescaler != old_prescaler) {
+			hspi1.Init.BaudRatePrescaler = new_prescaler;
+			if (HAL_SPI_Init(&hspi1) != HAL_OK) {
+				hspi1.Init.BaudRatePrescaler = old_prescaler;
+				(void)HAL_SPI_Init(&hspi1);
+			}
+		}
+		EXO_LOG("SPI1 prescaler (node flash) old=%lu new=%lu\r\n",
+				static_cast<unsigned long>(old_prescaler),
+				static_cast<unsigned long>(hspi1.Init.BaudRatePrescaler));
+	}
+
+	HAL_GPIO_WritePin(PWR_EN_GPIO_Port, PWR_EN_Pin, GPIO_PIN_SET);
+	node_prepare_touch_wakeup_before_poweroff();
+	HAL_Delay(200);
+	{
+		GPIO_InitTypeDef lpuart_rx_cfg = {0};
+		lpuart_rx_cfg.Pin = GPIO_PIN_3;
+		lpuart_rx_cfg.Mode = GPIO_MODE_AF_PP;
+		lpuart_rx_cfg.Pull = GPIO_PULLUP;
+		lpuart_rx_cfg.Speed = GPIO_SPEED_FREQ_LOW;
+		lpuart_rx_cfg.Alternate = GPIO_AF8_LPUART1;
+		HAL_GPIO_Init(GPIOA, &lpuart_rx_cfg);
+	}
+	RGB.OFF();
+	ERM_PWM.SET_PERCENT(0U);
+	BUZZER.SET_PERCENT(0U);
+
+	EXO_LOG("[BUILD][NODE] ble-rx-log-bridge active\r\n");
+	EXO_LOG("UART callbacks idle; BLE-only transport active\r\n");
+#if EXO_PROFILE_DIAG
+	{
+		uint8_t devices_on_i2c1 = I2C_ScanBus(&hi2c1);
+		uint8_t devices_on_i2c3 = I2C_ScanBus(&hi2c3);
+		EXO_LOG("I2C1: %d device(s) found\r\n", devices_on_i2c1);
+		EXO_LOG("I2C3: %d device(s) found\r\n", devices_on_i2c3);
+	}
+	const HAL_StatusTypeDef bno_probe = HAL_I2C_IsDeviceReady(&hi2c3, (0x4BU << 1U), 2U, 20U);
+	const HAL_StatusTypeDef icm_probe = I2C1_RecoverAndProbe(0x69U);
+	EXO_LOG("I2C probe: BNO85(0x4B,I2C3)=%s, ICM45686(0x69,I2C1)=%s\r\n",
+			I2cReadyStr(bno_probe), I2cReadyStr(icm_probe));
+#endif
+
+#if EXO_NODE_FLASH_ENABLED
+	const bool node_recording_ready = node_recording_app.begin();
+	EXO_LOG("Node recording: %s\r\n", node_recording_ready ? "ready" : "not ready");
+	if (node_recording_ready)
+	{
+		exo::node_runtime_config::set_storage_hooks(&NodeFlashRead, &NodeFlashWrite, &NodeFlashErase);
+		(void)exo::node_runtime_config::set_flash_capacity(
+				node_recording_app.detected_flash_capacity());
+		/* Commission once, here, now that the real flash capacity is known and the
+		 * settings sector base is correct. Everything after this point only reads. */
+		const bool node_id_provisioned = exo::node_runtime_config::provision_node_id(EXO_NODE_ID);
+		const uint8_t runtime_node_id = exo::node_runtime_config::current_node_id(EXO_NODE_ID);
+		node_recording_app.set_node_id(runtime_node_id);
+		EXO_LOG("Node ID runtime=%u (default=%u provisioned=%u)\r\n",
+				static_cast<unsigned>(runtime_node_id),
+				static_cast<unsigned>(EXO_NODE_ID),
+				static_cast<unsigned>(node_id_provisioned ? 1U : 0U));
+		EXO_LOG("Node flash capacity=%lu max_duration_ms=%lu\r\n",
+				static_cast<unsigned long>(node_recording_app.detected_flash_capacity()),
+				static_cast<unsigned long>(node_recording_app.maximum_duration_ms()));
+	}
+	else
+	{
+		EXO_LOG("Node ID runtime fallback=%u (flash unavailable)\r\n",
+				static_cast<unsigned>(EXO_NODE_ID));
+	}
+	if (!node_recording_ready)
+	{
+		const exo::W25Q256Flash::DebugInfo info = node_recording_app.flash_debug_info();
+		EXO_LOG("W25Q init dbg: err=%s drv=%u jedec=%02X %02X %02X spi_cmd=0x%02X hal=%u hdr=%lu\r\n",
+				node_recording_app.flash_last_error_string(),
+				info.last_driver_result,
+				info.jedec_manufacturer,
+				info.jedec_device_hi,
+				info.jedec_device_lo,
+				info.last_spi_instruction,
+				info.last_hal_status,
+				info.last_header_len);
+		EXO_LOG("W25Q init xfer: stage=%u in=%lu out=%lu\r\n",
+				info.last_spi_stage, info.last_in_len, info.last_out_len);
+	}
+#if EXO_NODE_FLASH_TEST_BOOT_ENABLE
+	if (node_recording_ready)
+	{
+		(void)RunFlashTest128();
+	}
+#endif
+#else
+	EXO_LOG("Node recording disabled until flash SPI/CS CubeMX setup is complete\r\n");
+#endif
+
+#if EXO_NODE_SENSOR_TEST_ENABLE
+	const bool hub_sensor_test_ready = hub_sensor_test_app.begin();
+	EXO_LOG("Hub sensor test: %s\r\n", hub_sensor_test_ready ? "ready" : "not ready");
+#endif
+  /* USER CODE END 2 */
+
+  /* Init code for STM32_WPAN */
+  MX_APPE_Init();
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+
+	while (1)
+	{
+    /* USER CODE END WHILE */
+    MX_APPE_Process();
+
+  /* USER CODE BEGIN 3 */
+		NodeSwo_Process();
+		enum class TouchShutdownState : uint8_t {
+			Idle,
+			Held,
+			WaitingForRelease,
+			ShutdownDelay,
+			PoweredOff
+		};
+		static TouchShutdownState touch_shutdown_state = TouchShutdownState::Idle;
+		static uint32_t touch_start_ms = 0U;
+		static uint32_t touch_release_ms = 0U;
+		static uint32_t touch_feedback_until_ms = 0U;
+		static bool ignore_touch_until_release = (HAL_GPIO_ReadPin(TOUCH_MCU_GPIO_Port, TOUCH_MCU_Pin) == GPIO_PIN_SET);
+		Custom_APP_ProcessControlWrites();
+		/* Bounded haptic pulse expires locally, independent of BLE (Section 6.4). */
+		if (g_node_haptic_pulse.service(HAL_GetTick())) {
+			ERM_PWM.SET_PERCENT(0U);
+		}
+		exo_node_ble_link_process();
+
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+		/* BLE/control owns the foreground immediately after StopRecord. Process
+		 * retained-session upload/status before sensor housekeeping so a busy
+		 * BNO can never starve the reliable transport. */
+		node_blepipe_process_recording_upload();
+		node_blepipe_process_live_samples();
+		node_blepipe_report_upload_diagnostics();
+		(void)node_blepipe_send_record_ready_status(false);
+		node_recording_app.process();
+#endif
+#if EXO_NODE_SENSOR_TEST_ENABLE
+		(void)hub_sensor_test_app.process();
+#endif
+		const GPIO_PinState touch_pin_state = HAL_GPIO_ReadPin(TOUCH_MCU_GPIO_Port, TOUCH_MCU_Pin);
+		const bool touch_active = (touch_pin_state == GPIO_PIN_SET);
+		const uint32_t now_ms = HAL_GetTick();
+		static uint32_t swo_alive_last_ms = 0U;
+		if ((now_ms - swo_alive_last_ms) >= 1000U) {
+			swo_alive_last_ms = now_ms;
+			NodeSwo_Logf("[SWO][NODE] alive tick=%lu\r\n",
+					static_cast<unsigned long>(now_ms));
+		}
+
+		if (g_node_touch_test_active && static_cast<int32_t>(now_ms - g_node_touch_test_until_ms) >= 0) {
+			g_node_touch_test_active = false;
+			g_node_actuator_override_enabled = false;
+			ERM_PWM.SET_PERCENT(0);
+			BUZZER.SET_PERCENT(0);
+			RGB.OFF();
+			node_blepipe_send_touch_status(kTouchStatusReleased);
+		}
+		if (g_node_poweroff_test_pending && static_cast<int32_t>(now_ms - g_node_poweroff_test_at_ms) >= 0) {
+			g_node_poweroff_test_pending = false;
+			ERM_PWM.SET_PERCENT(0);
+			BUZZER.SET_PERCENT(0);
+			RGB.OFF();
+			node_blepipe_send_touch_status(kTouchStatusTurningOff);
+			node_poweroff_pcb_and_wait_for_release();
+		}
+		if (g_node_touch_test_active || g_node_poweroff_test_pending) {
+			continue;
+		}
+
+		if (ignore_touch_until_release) {
+			if (!touch_active) {
+				ignore_touch_until_release = false;
+			}
+			continue;
+		}
+
+		switch (touch_shutdown_state) {
+			case TouchShutdownState::Idle:
+				if (touch_active) {
+					BUZZER.SET_PERCENT(50);
+					RGB.ON();
+					touch_start_ms = now_ms;
+					touch_feedback_until_ms = now_ms + 500U;
+					touch_shutdown_state = TouchShutdownState::Held;
+					node_blepipe_send_touch_status(kTouchStatusPressed);
+					EXO_LOG("Touched\r\n");
+				} else if (g_node_actuator_override_enabled == false) {
+					const bool blink_on = ((now_ms % 3000U) < 500U);
+					const bool connected = (APP_BLE_Get_Server_Connection_Status() == APP_BLE_CONNECTED_SERVER);
+
+					if (blink_on) {
+						RGB.SET(false, connected, !connected);
+					} else {
+						RGB.OFF();
+					}
+				}
+				break;
+
+			case TouchShutdownState::Held:
+				if (!touch_active) {
+					BUZZER.SET_PERCENT(0);
+					ERM_PWM.SET_PERCENT(0);
+					RGB.OFF();
+					touch_shutdown_state = TouchShutdownState::Idle;
+					node_blepipe_send_touch_status(kTouchStatusReleased);
+					EXO_LOG("Released\r\n");
+				} else if ((now_ms - touch_start_ms) >= 5000U) {
+					BUZZER.SET_PERCENT(0);
+					ERM_PWM.SET_PERCENT(0);
+					RGB.SET(true, false, false);
+					node_blepipe_send_touch_status(kTouchStatusShutdownArmed);
+					EXO_LOG("Touch shutdown armed\r\n");
+					EXO_LOG("Power off\r\n");
+					node_poweroff_pcb_and_wait_for_release();
+				} else if (static_cast<int32_t>(now_ms - touch_feedback_until_ms) >= 0) {
+					BUZZER.SET_PERCENT(0);
+					ERM_PWM.SET_PERCENT(0);
+					RGB.OFF();
+				}
+				break;
+
+			case TouchShutdownState::WaitingForRelease:
+				if (!touch_active) {
+					touch_release_ms = now_ms;
+					touch_shutdown_state = TouchShutdownState::ShutdownDelay;
+					node_blepipe_send_touch_status(kTouchStatusTurningOff);
+					EXO_LOG("Touch shutdown release\r\n");
+				}
+				break;
+
+			case TouchShutdownState::ShutdownDelay:
+				RGB.SET(true, false, false);
+				if ((now_ms - touch_release_ms) >= 1000U) {
+					BUZZER.SET_PERCENT(0);
+					ERM_PWM.SET_PERCENT(0);
+					RGB.OFF();
+					EXO_LOG("Power off\r\n");
+					node_blepipe_send_touch_status(kTouchStatusTurningOff);
+					node_poweroff_pcb_and_wait_for_release();
+					touch_shutdown_state = TouchShutdownState::PoweredOff;
+				}
+				break;
+
+			case TouchShutdownState::PoweredOff:
+				break;
+		}
+	}
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Macro to configure the PLL multiplication factor
+  */
+  __HAL_RCC_PLL_PLLM_CONFIG(RCC_PLLM_DIV2);
+
+  /** Macro to configure the PLL clock source
+  */
+  __HAL_RCC_PLL_PLLSOURCE_CONFIG(RCC_PLLSOURCE_HSE);
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI1
+                              |RCC_OSCILLATORTYPE_HSE|RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_10;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure the SYSCLKSource, HCLK, PCLK1 and PCLK2 clocks dividers
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK4|RCC_CLOCKTYPE_HCLK2
+                              |RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLK2Divider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLK4Divider = RCC_SYSCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief Peripherals Common Clock Configuration
+  * @retval None
+  */
+void PeriphCommonClock_Config(void)
+{
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+
+  /** Initializes the peripherals clock
+  */
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SMPS|RCC_PERIPHCLK_RFWAKEUP;
+  PeriphClkInitStruct.RFWakeUpClockSelection = RCC_RFWKPCLKSOURCE_HSE_DIV1024;
+  PeriphClkInitStruct.SmpsClockSelection = RCC_SMPSCLKSOURCE_HSI;
+  PeriphClkInitStruct.SmpsDivSelection = RCC_SMPSCLKDIV_RANGE1;
+
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN Smps */
+
+  /* USER CODE END Smps */
+}
+
+/* USER CODE BEGIN 4 */
+extern "C" uint8_t exo_node_ble_runtime_id(void)
+{
+#if EXO_NODE_FLASH_ENABLED
+	return exo::node_runtime_config::current_node_id(EXO_NODE_ID);
+#else
+	return EXO_NODE_ID;
+#endif
+}
+
+extern "C" void exo_node_ble_log(const char *format, ...)
+{
+	if (format == nullptr) {
+		return;
+	}
+
+	char message[224] = {0};
+	va_list args;
+	va_start(args, format);
+	const int written = vsnprintf(message, sizeof(message), format, args);
+	va_end(args);
+	if (written > 0) {
+		EXO_LOG("%s", message);
+	}
+}
+
+extern "C" uint8_t exo_node_ble_write(const uint8_t *payload, uint8_t length)
+{
+	if (payload == nullptr || length == 0U) {
+		EXO_LOG("[BLE][WRITE] empty payload len=%u\r\n", (unsigned) length);
+		return 0U;
+	}
+	blepipe_hdr_t pipe_hdr{};
+	const uint8_t *pipe_payload = nullptr;
+	uint16_t pipe_payload_len = 0U;
+	const blepipe_status_t pipe_status = blepipe_decode(payload,
+			length,
+			&pipe_hdr,
+			&pipe_payload,
+			&pipe_payload_len);
+	if (pipe_status == BLEPIPE_STATUS_OK &&
+	    blepipe_msg_allowed_on_lane(BLEPIPE_LANE_CONTROL_RX, pipe_hdr.msg_type) != 0U) {
+		EXO_LOG("[BLEPIPE][NODE][WRITE] msg=0x%02X src=0x%04X dst=0x%04X len=%u\r\n",
+				(unsigned)pipe_hdr.msg_type,
+				(unsigned)pipe_hdr.src_id,
+				(unsigned)pipe_hdr.dst_id,
+				(unsigned)pipe_payload_len);
+		switch (pipe_hdr.msg_type) {
+		case BLEPIPE_MSG_COMMAND:
+		case BLEPIPE_MSG_STREAM_CONTROL:
+		case BLEPIPE_MSG_CONFIG_SET:
+			return node_handle_blepipe_command(pipe_hdr, pipe_payload, pipe_payload_len) ? 1U : 0U;
+		default:
+			node_blepipe_send_ack(pipe_hdr, 0U, pipe_payload_len > 0U ? pipe_payload[0] : 0U);
+			return 0U;
+		}
+	}
+#if EXO_BLE_LOG_LEVEL >= 2
+	EXO_LOG("[BLE][DBG][WRITE] cmd=0x%02X len=%u\r\n", (unsigned) payload[0], (unsigned) length);
+#endif
+	if (payload[0] == BLEPIPE_PROTO_VER) {
+		EXO_LOG("[BLEPIPE][NODE][WRITE] invalid frame status=%u len=%u\r\n",
+				static_cast<unsigned>(pipe_status),
+				static_cast<unsigned>(length));
+		return 0U;
+	}
+#if EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED
+	switch (payload[0]) {
+	case static_cast<uint8_t>(exo::RecordCommand::StartRecord):
+		if (length == sizeof(exo::StartRecordMessage)) {
+			exo::StartRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			node_blepipe_reset_upload_state();
+			const uint8_t ok = node_recording_app.start_recording(message) ? 1U : 0U;
+			EXO_LOG("[BLE][START] session=%lu result=%u\r\n",
+					(unsigned long) message.session_id, (unsigned) ok);
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_PREPARE, message.session_id, true);
+			(void)node_blepipe_send_record_ready_status(true);
+			return ok;
+		}
+		EXO_LOG("[BLE][START] bad len=%u expect=%u\r\n",
+				(unsigned) length, (unsigned) sizeof(exo::StartRecordMessage));
+		break;
+	case static_cast<uint8_t>(exo::RecordCommand::PrepareRecord):
+		if (length == sizeof(exo::StartRecordMessage)) {
+			exo::StartRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			node_blepipe_reset_upload_state();
+			const uint8_t ok = node_recording_app.prepare_recording(message) ? 1U : 0U;
+			EXO_LOG("[BLE][PREP] session=%lu result=%u\r\n",
+					(unsigned long) message.session_id, (unsigned) ok);
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_PREPARE, message.session_id, true);
+			(void)node_blepipe_send_record_ready_status(true);
+			return ok;
+		}
+		EXO_LOG("[BLE][PREP] bad len=%u expect=%u\r\n",
+				(unsigned) length, (unsigned) sizeof(exo::StartRecordMessage));
+		break;
+	case static_cast<uint8_t>(exo::RecordCommand::CommitPreparedRecord):
+		if (length == sizeof(exo::StartRecordMessage)) {
+			exo::StartRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			const uint8_t ok = node_recording_app.commit_prepared_recording(message) ? 1U : 0U;
+			EXO_LOG("[BLE][COMMIT] session=%lu result=%u\r\n",
+					(unsigned long) message.session_id, (unsigned) ok);
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_COMMIT, message.session_id, true);
+			(void)node_blepipe_send_record_ready_status(true);
+			return ok;
+		}
+		EXO_LOG("[BLE][COMMIT] bad len=%u expect=%u\r\n",
+				(unsigned) length, (unsigned) sizeof(exo::StartRecordMessage));
+		break;
+	case static_cast<uint8_t>(exo::RecordCommand::AbortPreparedRecord):
+		node_recording_app.abort_prepared_recording();
+		node_blepipe_reset_upload_state();
+		EXO_LOG("[BLE][ABORT_PREP]\r\n");
+		(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_ABORT, 0U, true);
+		(void)node_blepipe_send_record_ready_status(true);
+		return 1U;
+	case static_cast<uint8_t>(exo::RecordCommand::StopRecord):
+		if (length == sizeof(exo::StopRecordMessage)) {
+			exo::StopRecordMessage message{};
+			memcpy(&message, payload, sizeof(message));
+			const uint8_t ok = node_recording_app.stop_recording(message) ? 1U : 0U;
+			EXO_LOG("[BLE][STOP] session=%lu result=%u\r\n",
+					(unsigned long)message.session_id, (unsigned)ok);
+			return ok;
+		}
+		break;
+	case static_cast<uint8_t>(exo::RecordCommand::SessionCompleteAck):
+		if (length == sizeof(exo::SessionCompleteAckMessage)) {
+			const uint8_t ok = (node_recording_app.transfer_complete() && node_recording_app.acknowledge_and_erase()) ? 1U : 0U;
+			if (ok != 0U) {
+				node_blepipe_reset_upload_state();
+			}
+			EXO_LOG("[BLE][COMPLETE_ACK] result=%u\r\n", (unsigned) ok);
+			(void)node_blepipe_send_record_ready_status(true);
+			return ok;
+		}
+		EXO_LOG("[BLE][COMPLETE_ACK] bad len=%u expect=%u\r\n",
+				(unsigned) length, (unsigned) sizeof(exo::SessionCompleteAckMessage));
+		break;
+	case static_cast<uint8_t>(exo::RecordCommand::ChunkAck):
+	{
+		const uint8_t ok = node_blepipe_apply_legacy_chunk_ack(payload, length) ? 1U : 0U;
+		EXO_LOG("[BLE][CHUNK_ACK] result=%u len=%u\r\n", (unsigned) ok, (unsigned) length);
+		return ok;
+	}
+	case 0xB3U:
+	{
+		if (length == 1U) {
+			const uint8_t ok = node_recording_app.reset_to_idle_and_erase() ? 1U : 0U;
+			if (ok != 0U) {
+				node_blepipe_reset_upload_state();
+			}
+			EXO_LOG("[BLE][RESET] result=%u\r\n", (unsigned) ok);
+			(void)node_blepipe_send_record_start_heartbeat(BLEPIPE_RECORD_START_PHASE_NODE_RESET, 0U, true);
+			(void)node_blepipe_send_record_ready_status(true);
+			return ok;
+		}
+		EXO_LOG("[BLE][RESET] bad len=%u expect=1\r\n", (unsigned) length);
+		break;
+	}
+	case 0xB0U: /* set node id: payload[1]=new_id */
+	{
+		if (length < 2U) {
+			EXO_LOG("[BLE][CFG] set-node-id bad len=%u expect>=2\r\n", (unsigned) length);
+			return 0U;
+		}
+		const uint8_t new_id = payload[1];
+		if (!exo::node_runtime_config::is_valid_node_id(new_id)) {
+			EXO_LOG("[BLE][CFG] set-node-id invalid=%u\r\n", (unsigned) new_id);
+			return 0U;
+		}
+		if (!exo::node_runtime_config::store_node_id(new_id)) {
+			EXO_LOG("[BLE][CFG] set-node-id persist failed id=%u\r\n", (unsigned) new_id);
+			return 0U;
+		}
+		node_recording_app.set_node_id(new_id);
+		EXO_LOG("[BLE][CFG] set-node-id ok=%u (reboot not required)\r\n", (unsigned) new_id);
+		return 1U;
+	}
+	case 0xB1U: /* get node id */
+	{
+		const uint8_t current_id = exo::node_runtime_config::current_node_id(EXO_NODE_ID);
+		EXO_LOG("[BLE][CFG] get-node-id=%u\r\n", (unsigned) current_id);
+		return 1U;
+	}
+	default:
+		EXO_LOG("[BLE][WRITE] unsupported cmd=0x%02X len=%u\r\n", (unsigned) payload[0], (unsigned) length);
+		break;
+	}
+#else
+	EXO_LOG("[BLE][WRITE] forwarding disabled (EXO_NODE_BLE_FORWARD_ENABLE && EXO_NODE_FLASH_ENABLED == 0)\r\n");
+	(void)payload;
+	(void)length;
+#endif
+	return 0U;
+}
+
+extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	(void)huart;
+}
+
+extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+	(void)huart;
+	(void)Size;
+}
+
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+	(void)huart;
+}
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+	/* User can add his own implementation to report the HAL error return state */
+	__disable_irq();
+	while (1)
+	{
+	}
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
