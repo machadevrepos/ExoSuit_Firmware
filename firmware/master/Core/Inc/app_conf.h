@@ -194,7 +194,7 @@
  * Maximum number of simultaneous connections that the device will support.
  * Valid values are from 1 to 8
  */
-#define CFG_BLE_NUM_LINK            6
+#define CFG_BLE_NUM_LINK            7
 
 /**
  * Maximum number of Services that can be stored in the GATT database.

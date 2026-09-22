@@ -122,7 +122,7 @@ static uint32_t master_training_csv_status_last_emit_ms = 0U;
 #if EXO_MASTER_IMU_BACKGROUND_CSV_ENABLE
 static bool master_imu_csv_error_reported = false;
 #endif
-static exo::ble_hub::HubLeafBleManager leaf_ble_manager;
+static exo::ble_hub::HubLeafBleManagerU9 leaf_ble_manager;
 
 /* USER CODE END PV */
 

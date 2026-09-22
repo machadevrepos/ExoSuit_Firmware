@@ -563,6 +563,7 @@ private:
 /* Preserve the existing four-node API while allowing the same state machine to
  * be instantiated for a six-link hub. */
 using HubLeafBleManager = HubLeafBleManagerCore<4U>;
+using HubLeafBleManagerU9 = HubLeafBleManagerCore<6U, 1U>;
 
 } // namespace exo::ble_hub
 

@@ -64,8 +64,9 @@ extern "C" uint8_t exo_master_training_owns_node_link(uint8_t node_id);
 extern "C" uint8_t exo_master_training_raw_download_debug_enabled(void);
 extern "C" void exo_master_training_note_suppressed_relay(void);
 
-/* Four physical suit nodes; CFG_BLE_NUM_LINK still reserves the browser link. */
-#define EXO_HUB_LEAF_MAX                 4U
+/* U9 owns six physical suit nodes; CFG_BLE_NUM_LINK also reserves the phone
+ * peripheral link. */
+#define EXO_HUB_LEAF_MAX                 6U
 #define EXO_HUB_SCAN_INTERVAL            0x0040U
 #define EXO_HUB_SCAN_WINDOW              0x0030U
 #define EXO_HUB_SCAN_INTERVAL_CONNECTED  0x00A0U

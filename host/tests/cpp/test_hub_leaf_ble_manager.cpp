@@ -11,6 +11,10 @@
 
 int main()
 {
+    using U9Manager = exo::ble_hub::HubLeafBleManagerU9;
+    static_assert(U9Manager::kFirstLeafId == 1U);
+    static_assert(U9Manager::kLastLeafId == 6U);
+
     exo::ble_hub::HubLeafBleManager manager;
     uint8_t payload = 0U;
     for (uint8_t node = 1U; node <= 4U; ++node) {
