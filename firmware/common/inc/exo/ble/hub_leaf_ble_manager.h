@@ -8,10 +8,16 @@
 
 namespace exo::ble_hub {
 
-template<uint8_t MaxLeaves>
+template<uint8_t MaxLeaves, uint8_t FirstNodeId = 1U>
 class HubLeafBleManagerCore {
 public:
   static_assert(MaxLeaves > 0U, "HubLeafBleManagerCore requires at least one leaf");
+  static_assert(FirstNodeId >= 1U &&
+                static_cast<uint16_t>(FirstNodeId) + MaxLeaves - 1U <= 12U,
+                "HubLeafBleManagerCore leaf range must fit the twelve-node topology");
+  static constexpr uint8_t kFirstLeafId = FirstNodeId;
+  static constexpr uint8_t kLastLeafId =
+      static_cast<uint8_t>(FirstNodeId + MaxLeaves - 1U);
   struct LiveSample {
     uint8_t node_id = 0U;
     uint8_t sensor_id = 0U;
@@ -74,7 +80,7 @@ public:
   bool push_leaf_sample(uint8_t node_id, uint8_t sensor_id,
                         const uint8_t *payload, uint8_t payload_len,
                         uint32_t recv_ms = 0U) {
-    if (node_id < 1U || node_id > kMaxLeaves || sensor_id < 1U || sensor_id > 2U ||
+    if (!valid_node_id_(node_id) || sensor_id < 1U || sensor_id > 2U ||
         payload == nullptr || payload_len == 0U ||
         payload_len > sizeof(LiveSample::payload)) {
       return false;
@@ -93,7 +99,7 @@ public:
     }
     ++pending_live_count_;
     ++live_rx_total_;
-    ++live_rx_by_node_[node_id - 1U];
+    ++live_rx_by_node_[node_index_(node_id)];
     selected_live_index_ = kNoLiveSelection;
     start_or_record_active_ = true;
     return true;
@@ -124,8 +130,9 @@ public:
     const int8_t selected = select_next_live_index_();
     if (selected >= 0) {
       const uint8_t source = live_slots_[static_cast<uint8_t>(selected)].front().node_id;
-      if (source >= 1U && source <= kMaxLeaves) {
-        next_preview_source_ = source == kMaxLeaves ? 1U : static_cast<uint8_t>(source + 1U);
+      if (valid_node_id_(source)) {
+        next_preview_source_ = source == kLastLeafId ? kFirstLeafId :
+            static_cast<uint8_t>(source + 1U);
       }
     }
     selected_live_index_ = kNoLiveSelection;
@@ -151,10 +158,11 @@ public:
     const uint8_t source = slot.front().node_id;
     slot.pop();
     if (pending_live_count_ > 0U) --pending_live_count_;
-    if (source >= 1U && source <= kMaxLeaves) {
-      sensor_preference_[source - 1U] =
-          static_cast<uint8_t>(sensor_preference_[source - 1U] ^ 1U);
-      next_preview_source_ = source == kMaxLeaves ? 1U : static_cast<uint8_t>(source + 1U);
+    if (valid_node_id_(source)) {
+      sensor_preference_[node_index_(source)] =
+          static_cast<uint8_t>(sensor_preference_[node_index_(source)] ^ 1U);
+      next_preview_source_ = source == kLastLeafId ? kFirstLeafId :
+          static_cast<uint8_t>(source + 1U);
     }
     selected_live_index_ = kNoLiveSelection;
     if (pending_live_count_ == 0U && queued_done_count_ == 0U &&
@@ -169,7 +177,7 @@ public:
   }
 
   uint32_t live_dropped(uint8_t node_id, uint8_t sensor_id) const {
-    if (node_id < 1U || node_id > kMaxLeaves || sensor_id < 1U || sensor_id > 2U) {
+    if (!valid_node_id_(node_id) || sensor_id < 1U || sensor_id > 2U) {
       return 0U;
     }
     return live_slots_[live_slot_index_(node_id, sensor_id)].dropped;
@@ -179,13 +187,13 @@ public:
    * means the Master received the sample from the node but its own forward
    * queue overflowed - distinct from leaf-link RF loss. */
   uint32_t live_dropped_for_node(uint8_t node_id) const {
-    if (node_id < 1U || node_id > kMaxLeaves) return 0U;
+    if (!valid_node_id_(node_id)) return 0U;
     return live_slots_[live_slot_index_(node_id, 1U)].dropped +
            live_slots_[live_slot_index_(node_id, 2U)].dropped;
   }
 
   uint32_t live_coalesced(uint8_t node_id, uint8_t sensor_id) const {
-    if (node_id < 1U || node_id > kMaxLeaves || sensor_id < 1U || sensor_id > 2U) {
+    if (!valid_node_id_(node_id) || sensor_id < 1U || sensor_id > 2U) {
       return 0U;
     }
     return 0U;
@@ -198,7 +206,7 @@ public:
    * total points the finger at the node side, not the Master forwarder. */
   uint32_t live_rx_total() const { return live_rx_total_; }
   uint32_t live_rx_for_node(uint8_t node_id) const {
-    return (node_id >= 1U && node_id <= kMaxLeaves) ? live_rx_by_node_[node_id - 1U] : 0U;
+    return valid_node_id_(node_id) ? live_rx_by_node_[node_index_(node_id)] : 0U;
   }
   void reset_live_rx_stats() {
     live_rx_total_ = 0U;
@@ -207,7 +215,7 @@ public:
 
   bool queue_record_done(const exo::RecordDoneMessage &message) {
     if (message.command != exo::RecordCommand::RecordDone ||
-        message.node_id < 1U || message.node_id > kMaxLeaves ||
+        message.node_id < kFirstLeafId || message.node_id > kLastLeafId ||
         message.session_id == 0U ||
         message.total_size < sizeof(exo::SessionHeader)) {
       return false;
@@ -236,7 +244,7 @@ public:
     }
     for (uint8_t i = 0U; i < kMaxLeaves; ++i) sensor_preference_[i] = 0U;
     pending_live_count_ = 0U;
-    next_preview_source_ = 1U;
+    next_preview_source_ = kFirstLeafId;
     selected_live_index_ = kNoLiveSelection;
     next_live_attempt_ms_ = 0U;
     last_live_failure_ms_ = 0U;
@@ -272,7 +280,7 @@ public:
   void rediscover_nodes() { ++discovery_generation_; }
 
   void touch_node(uint8_t node_id) {
-    if (node_id < 1U || node_id > kMaxLeaves || find_node_index(node_id) >= 0) return;
+    if (!valid_node_id_(node_id) || find_node_index(node_id) >= 0) return;
     const int8_t slot = find_free_slot();
     if (slot < 0) return;
     nodes_[slot].node_id = node_id;
@@ -282,7 +290,7 @@ public:
   }
 
   bool provision_node_id(uint8_t current_id, uint8_t new_id) {
-    if (new_id < 1U || new_id > kMaxLeaves) return false;
+    if (!valid_node_id_(new_id)) return false;
     const int8_t existing = find_node_index(new_id);
     if (existing >= 0 && nodes_[existing].node_id != current_id) return false;
     int8_t slot = find_node_index(current_id);
@@ -401,6 +409,14 @@ private:
   static constexpr uint8_t kLiveDepthPerSlot = 8U;
   static constexpr int8_t kNoLiveSelection = -1;
 
+  static constexpr bool valid_node_id_(uint8_t node_id) {
+    return node_id >= kFirstLeafId && node_id <= kLastLeafId;
+  }
+
+  static constexpr uint8_t node_index_(uint8_t node_id) {
+    return static_cast<uint8_t>(node_id - kFirstLeafId);
+  }
+
   struct NodeSlot { uint8_t node_id = 0U; bool discovered = false; bool connected = false; };
   struct LiveSlot {
     LiveSample samples[kLiveDepthPerSlot]{};
@@ -441,7 +457,8 @@ private:
   static constexpr uint32_t kCongestionRecoveryMs = 5000U;
 
   static uint8_t live_slot_index_(uint8_t node_id, uint8_t sensor_id) {
-    return static_cast<uint8_t>((node_id - 1U) * kSensorsPerLeaf + (sensor_id - 1U));
+    return static_cast<uint8_t>(node_index_(node_id) * kSensorsPerLeaf +
+                                (sensor_id - 1U));
   }
 
   int8_t select_next_live_index_() const {
@@ -455,8 +472,8 @@ private:
     }
     for (uint8_t offset = 0U; offset < kMaxLeaves; ++offset) {
       const uint8_t source = static_cast<uint8_t>(
-          ((next_preview_source_ - 1U + offset) % kMaxLeaves) + 1U);
-      const uint8_t preferred = sensor_preference_[source - 1U];
+          kFirstLeafId + ((node_index_(next_preview_source_) + offset) % kMaxLeaves));
+      const uint8_t preferred = sensor_preference_[node_index_(source)];
       const uint8_t first = live_slot_index_(source, static_cast<uint8_t>(preferred + 1U));
       const uint8_t second = live_slot_index_(source,
           static_cast<uint8_t>((preferred ^ 1U) + 1U));
@@ -525,7 +542,7 @@ private:
   uint8_t pending_live_count_ = 0U;
   uint32_t live_rx_total_ = 0U;
   uint32_t live_rx_by_node_[kMaxLeaves]{};
-  uint8_t next_preview_source_ = 1U;
+  uint8_t next_preview_source_ = kFirstLeafId;
   mutable int8_t selected_live_index_ = kNoLiveSelection;
   uint32_t next_live_attempt_ms_ = 0U;
   uint32_t last_live_failure_ms_ = 0U;
