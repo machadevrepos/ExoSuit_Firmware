@@ -68,6 +68,16 @@ typedef enum {
   BLEPIPE_MSG_STREAM_PROFILE  = 0x44
 } blepipe_msg_type_t;
 
+/* ID 0 remains reachable for commissioning/control exchanges, but it must not
+ * emit data that a hub could treat as a normal node source. */
+static inline uint8_t blepipe_node_message_allowed(uint8_t node_id, uint8_t msg_type)
+{
+  if (node_id >= 1U && node_id <= 12U) return 1U;
+  if (node_id == 0U && msg_type != BLEPIPE_MSG_LEAF_SAMPLE &&
+      msg_type != BLEPIPE_MSG_RAW_FORWARD) return 1U;
+  return 0U;
+}
+
 typedef enum {
   BLEPIPE_STATUS_OK = 0,
   BLEPIPE_STATUS_BAD_ARG,

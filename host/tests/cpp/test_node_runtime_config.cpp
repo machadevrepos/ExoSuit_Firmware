@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <iostream>
 
+#include <exo/protocol/blepipe_proto.h>
 #include <exo/storage/node_runtime_config.h>
 
 namespace {
@@ -38,6 +39,13 @@ int main()
     EXPECT_TRUE(!exo::node_runtime_config::normal_traffic_allowed(0U));
     EXPECT_TRUE(exo::node_runtime_config::normal_traffic_allowed(1U));
     EXPECT_TRUE(exo::node_runtime_config::normal_traffic_allowed(12U));
+
+    EXPECT_TRUE(blepipe_node_message_allowed(0U, BLEPIPE_MSG_ACK) != 0U);
+    EXPECT_TRUE(blepipe_node_message_allowed(0U, BLEPIPE_MSG_LEAF_SAMPLE) == 0U);
+    EXPECT_TRUE(blepipe_node_message_allowed(0U, BLEPIPE_MSG_RAW_FORWARD) == 0U);
+    EXPECT_TRUE(blepipe_node_message_allowed(1U, BLEPIPE_MSG_LEAF_SAMPLE) != 0U);
+    EXPECT_TRUE(blepipe_node_message_allowed(12U, BLEPIPE_MSG_RAW_FORWARD) != 0U);
+    EXPECT_TRUE(blepipe_node_message_allowed(13U, BLEPIPE_MSG_ACK) == 0U);
 
     if (failures != 0) {
         std::cerr << failures << " node runtime configuration check(s) failed\n";

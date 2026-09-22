@@ -411,11 +411,18 @@ static bool node_blepipe_send_with_status(Custom_STM_Char_Opcode_t char_opcode,
 	uint8_t packet[BLEPIPE_MAX_NOTIFY_PAYLOAD];
 	size_t encoded_len = 0U;
 	blepipe_hdr_t hdr{};
+	const uint16_t source_id = node_blepipe_current_id();
+	if (blepipe_node_message_allowed(static_cast<uint8_t>(source_id), msg_type) == 0U) {
+		if (tx_status_out != nullptr) {
+			*tx_status_out = BLE_STATUS_INVALID_PARAMS;
+		}
+		return false;
+	}
 	hdr.proto_ver = BLEPIPE_PROTO_VER;
 	hdr.msg_type = msg_type;
 	hdr.flags = 0U;
 	hdr.hop_count = 0U;
-	hdr.src_id = node_blepipe_current_id();
+	hdr.src_id = source_id;
 	hdr.dst_id = dst_id;
 	hdr.seq = g_node_blepipe_tx_seq++;
 	hdr.timestamp_ms = HAL_GetTick();
