@@ -4472,16 +4472,21 @@ extern "C" uint8_t exo_hub_leaf_stream_ingest(uint8_t node_id,
 		const uint8_t *payload,
 		uint8_t payload_len)
 		{
-	/* Runs in the leaf-RX ACI callback context (MX_APPE_Process), i.e. as close
-	 * to "sample received from the node" as the Master can observe. Stamped here
-	 * so the forwarded B1 time_ms tracks the node's bundle cadence, not the
-	 * Master's bursty forward time. */
-	const uint32_t recv_ms = HAL_GetTick();
+	return exo_hub_leaf_stream_ingest_at(node_id, sensor_id, payload, payload_len,
+			HAL_GetTick());
+}
+
+extern "C" uint8_t exo_hub_leaf_stream_ingest_at(uint8_t node_id,
+		uint8_t sensor_id,
+		const uint8_t *payload,
+		uint8_t payload_len,
+		uint32_t acquisition_ms)
+		{
 	const uint8_t ok = leaf_ble_manager.push_leaf_sample(node_id,
 			sensor_id,
 			payload,
 			payload_len,
-			recv_ms) ? 1U : 0U;
+			acquisition_ms) ? 1U : 0U;
 	if (ok != 0U) {
 		EXO_LOG("[BLE][HUB][LEAF] sample queued node=%u sensor=%u len=%u\r\n",
 				static_cast<unsigned>(node_id),

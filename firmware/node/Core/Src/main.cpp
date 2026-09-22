@@ -55,6 +55,7 @@
 #include <exo/storage/node_runtime_config.h>
 #include <exo/protocol/ble_record_protocol.h>
 #include <exo/protocol/blepipe_proto.h>
+#include <exo/protocol/live_bundle_v2.h>
 #include <exo/ble/app_ble.h>
 #include <exo/ble/custom_app.h>
 #include <exo/ble/node_upload_pump.h>
@@ -362,18 +363,19 @@ static uint32_t g_node_live_seen_tx_pool_event_count = 0U;
  * PipeDataTx notification per tick, instead of one notification per sensor.
  * Halves the node->master packet count (the shared-radio ceiling). Distinct
  * from the legacy per-sensor path's payload[0] = sensor_id (1 or 2). */
-static constexpr uint8_t kNodeLiveBundleMarker = 0x03U;
+static constexpr uint8_t kNodeLiveBundleMarker = exo::kLiveBundleV2Marker;
 static_assert(kNodeLiveBundleMarker != 1U && kNodeLiveBundleMarker != 2U,
 		"bundle marker must not collide with a sensor_id");
 /* Live-stream forwarding telemetry, reported to the Master (SWO-free). */
 static uint32_t g_node_live_sent_count = 0U;
 static uint32_t g_node_live_gate_bp_count = 0U;
 static uint32_t g_node_live_bundle_next_ms = 0U;
+static uint32_t g_node_live_bundle_sequence = 0U;
 /* Last sample of each sensor, re-sent in a bundle when that sensor produced
  * nothing fresh this tick so its stream stays at the bundle cadence (the BNO
  * 100 Hz report jitters against the 40 ms tick and would otherwise drop ~10%).
- * The Master re-stamps every forwarded frame with its own clock, so a repeated
- * value still arrives as a fresh, monotonic sample at the host. */
+ * Acquisition timestamps stay with each retained sample so repeats do not
+ * become false fresh measurements at the Master. */
 static uint32_t g_node_live_bno_fresh_count = 0U;
 static uint32_t g_node_live_icm_fresh_count = 0U;
 static exo::NodeRecordingApp::LiveSample g_node_live_last_bno{};
@@ -519,13 +521,13 @@ static void node_blepipe_process_live_samples()
 		if (s.sensor_id == exo::NodeRecordingApp::kBnoLiveSensorId) {
 			g_node_live_last_bno = s;
 			g_node_live_last_bno_valid = true;
-			g_node_live_last_bno_ms = now_ms;
+			g_node_live_last_bno_ms = s.acquisition_time_ms;
 			bno_fresh = true;
 			++g_node_live_bno_fresh_count;
 		} else if (s.sensor_id == exo::NodeRecordingApp::kIcmLiveSensorId) {
 			g_node_live_last_icm = s;
 			g_node_live_last_icm_valid = true;
-			g_node_live_last_icm_ms = now_ms;
+			g_node_live_last_icm_ms = s.acquisition_time_ms;
 			icm_fresh = true;
 			++g_node_live_icm_fresh_count;
 		}
@@ -550,23 +552,31 @@ static void node_blepipe_process_live_samples()
 		g_node_live_bundle_next_ms = now_ms + interval_ms / 2U;
 		return;
 	}
-	uint8_t payload[3U + (2U * exo::NodeRecordingApp::kMaxLivePayload)]{};
-	uint16_t n = 0U;
-	payload[n++] = kNodeLiveBundleMarker;
-	payload[n++] = static_cast<uint8_t>(put_bno ? g_node_live_last_bno.payload_len : 0U);
+	exo::LiveBundleV2Message<exo::NodeRecordingApp::kMaxLivePayload> bundle{};
+	bundle.flags = (put_bno ? exo::kLiveBundleV2FlagBnoPresent : 0U) |
+			(put_icm ? exo::kLiveBundleV2FlagIcmPresent : 0U);
+	bundle.bno_payload_length = put_bno ? g_node_live_last_bno.payload_len : 0U;
+	bundle.icm_payload_length = put_icm ? g_node_live_last_icm.payload_len : 0U;
+	bundle.bundle_sequence = ++g_node_live_bundle_sequence;
+	bundle.bno_acquired_ms = put_bno ? g_node_live_last_bno.acquisition_time_ms : 0U;
+	bundle.icm_acquired_ms = put_icm ? g_node_live_last_icm.acquisition_time_ms : 0U;
 	if (put_bno) {
-		memcpy(payload + n, g_node_live_last_bno.payload, g_node_live_last_bno.payload_len);
-		n = static_cast<uint16_t>(n + g_node_live_last_bno.payload_len);
+		memcpy(bundle.bno_payload, g_node_live_last_bno.payload, bundle.bno_payload_length);
 	}
-	payload[n++] = static_cast<uint8_t>(put_icm ? g_node_live_last_icm.payload_len : 0U);
 	if (put_icm) {
-		memcpy(payload + n, g_node_live_last_icm.payload, g_node_live_last_icm.payload_len);
-		n = static_cast<uint16_t>(n + g_node_live_last_icm.payload_len);
+		memcpy(bundle.icm_payload, g_node_live_last_icm.payload, bundle.icm_payload_length);
+	}
+	uint8_t payload[BLEPIPE_MAX_APP_PAYLOAD]{};
+	size_t encoded_len = 0U;
+	if (!exo::live_bundle_v2_encode(bundle, payload, sizeof(payload), &encoded_len)) {
+		g_node_live_bundle_next_ms = now_ms + interval_ms;
+		return;
 	}
 
 	tBleStatus tx_status = BLE_STATUS_INVALID_PARAMS;
 	if (node_blepipe_send_with_status(CUSTOM_STM_PIPEDATATX,
-			BLEPIPE_MSG_LEAF_SAMPLE, BLEPIPE_ID_HUB, payload, n, nullptr, &tx_status)) {
+			BLEPIPE_MSG_LEAF_SAMPLE, BLEPIPE_ID_HUB, payload,
+			static_cast<uint16_t>(encoded_len), nullptr, &tx_status)) {
 		/* Count individual samples (not bundles) so it lines up with the
 		 * Master's per-sample rx counter. */
 		g_node_live_sent_count += (put_bno ? 1U : 0U) + (put_icm ? 1U : 0U);
@@ -1331,6 +1341,7 @@ static bool node_handle_blepipe_command(const blepipe_hdr_t &hdr,
 			g_node_live_gate_bp_count = 0U;
 			g_node_live_bno_fresh_count = 0U;
 			g_node_live_icm_fresh_count = 0U;
+			g_node_live_bundle_sequence = 0U;
 			g_node_live_last_bno_valid = false;
 			g_node_live_last_icm_valid = false;
 			g_node_live_last_bno_ms = 0U;

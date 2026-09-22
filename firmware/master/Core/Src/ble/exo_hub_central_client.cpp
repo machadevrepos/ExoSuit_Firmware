@@ -1,6 +1,7 @@
 #include <exo/ble/exo_hub_central_client.h>
 #include <exo/ble/link_tune_state.h>
 #include <exo/protocol/ble_record_protocol.h>
+#include <exo/protocol/live_bundle_v2.h>
 
 #include <string.h>
 
@@ -1488,6 +1489,30 @@ static void exo_handle_pipe_packet(exo_leaf_slot_t *slot,
       {
         (void)exo_hub_leaf_stream_ingest(node, 2U, payload + off, icm_len);
       }
+    }
+    return;
+  }
+  if (hdr.msg_type == BLEPIPE_MSG_LEAF_SAMPLE &&
+      payload_len >= exo::kLiveBundleV2HeaderSize &&
+      payload[0] == exo::kLiveBundleV2Marker)
+  {
+    exo::LiveBundleV2Message<96U> bundle{};
+    if (!exo::live_bundle_v2_decode(payload, payload_len, bundle))
+    {
+      return;
+    }
+    const uint8_t node = slot->node_id != 0U ? slot->node_id : slot->node_hint;
+    if (bundle.bno_payload_length > 0U)
+    {
+      (void)exo_hub_leaf_stream_ingest_at(node, 1U, bundle.bno_payload,
+                                          bundle.bno_payload_length,
+                                          bundle.bno_acquired_ms);
+    }
+    if (bundle.icm_payload_length > 0U)
+    {
+      (void)exo_hub_leaf_stream_ingest_at(node, 2U, bundle.icm_payload,
+                                          bundle.icm_payload_length,
+                                          bundle.icm_acquired_ms);
     }
     return;
   }

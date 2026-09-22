@@ -14,11 +14,8 @@ public:
     uint8_t node_id = 0U;
     uint8_t sensor_id = 0U;
     uint8_t payload_len = 0U;
-    /* Master tick (HAL_GetTick) at the moment the leaf notification was
-     * ingested from the node. Carried into the B1 envelope time_ms so the
-     * browser builds its inference grid on the ~node bundle cadence instead of
-     * the Master's bursty forward time (which absorbs TX-pool queueing and the
-     * browser link's coalescing). */
+    /* Node acquisition tick for V2 bundles. Legacy notifications continue to
+     * use the Master receive tick until both sides migrate. */
     uint32_t recv_ms = 0U;
     uint8_t payload[96]{};
   };
