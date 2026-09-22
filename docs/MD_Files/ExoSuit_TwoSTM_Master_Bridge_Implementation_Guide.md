@@ -314,6 +314,23 @@ files).
 
 ## 7. Phased validation plan (gates are hard: no gate pass → no next phase)
 
+### Pre-flash hardware preflight record
+
+Complete this record on the assembled board before flashing U11 or relying on
+the bridge assumptions. A failed or unrecorded power, routing, SWD, or radio
+check blocks firmware implementation for the affected phase.
+
+| Check | Result | Evidence / date |
+|---|---|---|
+| U9 and U11 rails stable under power-up and idle load | **UNRECORDED** | |
+| U9/U11 reset and BOOT0 pins behave correctly | **UNRECORDED** | |
+| Both HSE and LSE clocks are present and stable | **UNRECORDED** | |
+| Both RF matching networks and antennas have continuity | **UNRECORDED** | |
+| USART1 PB6/PB7 cross-wiring and idle levels verified | **UNRECORDED** | |
+| Optional USART1 CK routing checked and marked unused or available | **UNRECORDED** | |
+| U9 and U11 SWD access independently verified | **UNRECORDED** | |
+| Current draw is recorded for U9-only and U9+U11 powered states | **UNRECORDED** | |
+
 ### Phase 0 — Desk checks & freeze (no hardware, ~half a day)
 
 | # | Task | How | Pass |
