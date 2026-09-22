@@ -564,6 +564,7 @@ private:
  * be instantiated for a six-link hub. */
 using HubLeafBleManager = HubLeafBleManagerCore<4U>;
 using HubLeafBleManagerU9 = HubLeafBleManagerCore<6U, 1U>;
+using HubLeafBleManagerU11 = HubLeafBleManagerCore<6U, 7U>;
 
 } // namespace exo::ble_hub
 

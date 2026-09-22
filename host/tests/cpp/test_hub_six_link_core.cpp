@@ -6,7 +6,9 @@
 
 int main()
 {
-    using Manager = exo::ble_hub::HubLeafBleManagerCore<6U, 7U>;
+    using Manager = exo::ble_hub::HubLeafBleManagerU11;
+    static_assert(Manager::kFirstLeafId == 7U);
+    static_assert(Manager::kLastLeafId == 12U);
     Manager manager;
     uint8_t payload = 0U;
     for (uint8_t node = 7U; node <= 12U; ++node) {
