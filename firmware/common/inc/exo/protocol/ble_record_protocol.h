@@ -1,6 +1,7 @@
 #ifndef BLE_RECORD_PROTOCOL_H_
 #define BLE_RECORD_PROTOCOL_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <exo/types/topology.h>
@@ -142,6 +143,64 @@ struct StartSessionV2Message {
     SourceMask selected_source_mask;
     uint8_t stream_interval_ms;
 };
+
+static constexpr uint8_t kStartSessionV2ProtocolVersion = 2U;
+static constexpr uint16_t kStartSessionV2WireSize = 21U;
+
+inline bool start_session_v2_encode(const StartSessionV2Message &message,
+                                    uint8_t *dst, size_t dst_len)
+{
+    if (dst == nullptr || dst_len < kStartSessionV2WireSize ||
+            message.command != RecordCommand::StartSessionV2 ||
+            message.protocol_version != kStartSessionV2ProtocolVersion) {
+        return false;
+    }
+    dst[0] = static_cast<uint8_t>(message.command);
+    dst[1] = message.protocol_version;
+    dst[2] = static_cast<uint8_t>(message.session_id);
+    dst[3] = static_cast<uint8_t>(message.session_id >> 8U);
+    dst[4] = static_cast<uint8_t>(message.session_id >> 16U);
+    dst[5] = static_cast<uint8_t>(message.session_id >> 24U);
+    for (uint8_t i = 0U; i < 8U; ++i) {
+        dst[6U + i] = static_cast<uint8_t>(message.start_timestamp_us >> (8U * i));
+    }
+    dst[14] = static_cast<uint8_t>(message.safety_duration_ms);
+    dst[15] = static_cast<uint8_t>(message.safety_duration_ms >> 8U);
+    dst[16] = static_cast<uint8_t>(message.safety_duration_ms >> 16U);
+    dst[17] = static_cast<uint8_t>(message.safety_duration_ms >> 24U);
+    dst[18] = static_cast<uint8_t>(message.selected_source_mask);
+    dst[19] = static_cast<uint8_t>(message.selected_source_mask >> 8U);
+    dst[20] = message.stream_interval_ms;
+    return true;
+}
+
+inline bool start_session_v2_decode(const uint8_t *src, size_t src_len,
+                                    StartSessionV2Message &message)
+{
+    if (src == nullptr || src_len != kStartSessionV2WireSize ||
+            src[0] != static_cast<uint8_t>(RecordCommand::StartSessionV2) ||
+            src[1] != kStartSessionV2ProtocolVersion) {
+        return false;
+    }
+    message.command = RecordCommand::StartSessionV2;
+    message.protocol_version = src[1];
+    message.session_id = static_cast<uint32_t>(src[2]) |
+                         (static_cast<uint32_t>(src[3]) << 8U) |
+                         (static_cast<uint32_t>(src[4]) << 16U) |
+                         (static_cast<uint32_t>(src[5]) << 24U);
+    message.start_timestamp_us = 0U;
+    for (uint8_t i = 0U; i < 8U; ++i) {
+        message.start_timestamp_us |= static_cast<uint64_t>(src[6U + i]) << (8U * i);
+    }
+    message.safety_duration_ms = static_cast<uint32_t>(src[14]) |
+                                 (static_cast<uint32_t>(src[15]) << 8U) |
+                                 (static_cast<uint32_t>(src[16]) << 16U) |
+                                 (static_cast<uint32_t>(src[17]) << 24U);
+    message.selected_source_mask = static_cast<SourceMask>(src[18]) |
+                                   (static_cast<SourceMask>(src[19]) << 8U);
+    message.stream_interval_ms = src[20];
+    return true;
+}
 
 struct RecordDoneMessage {
     RecordCommand command;
