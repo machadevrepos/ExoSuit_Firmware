@@ -69,3 +69,4 @@ exo_add_test(test_hub_leaf_ble_manager                test_hub_leaf_ble_manager.
 exo_add_test(test_link_tune_state                     test_link_tune_state.cpp)
 exo_add_test(test_node_upload_pump                    test_node_upload_pump.cpp)
 exo_add_test(test_notification_gate                   test_notification_gate.cpp)
+exo_add_test(test_topology_protocol                   test_topology_protocol.cpp)

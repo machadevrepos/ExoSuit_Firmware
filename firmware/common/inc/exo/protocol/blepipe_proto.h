@@ -15,11 +15,20 @@ extern "C" {
 #define BLEPIPE_MAX_APP_PAYLOAD    (BLEPIPE_MAX_NOTIFY_PAYLOAD - BLEPIPE_HDR_LEN - BLEPIPE_CRC_LEN)
 
 #define BLEPIPE_ID_HUB             0x0001U
+#define BLEPIPE_ID_HUB2            0x0002U
 #define BLEPIPE_ID_LEAF_1          0x0101U
 #define BLEPIPE_ID_LEAF_2          0x0102U
 #define BLEPIPE_ID_LEAF_3          0x0103U
 #define BLEPIPE_ID_LEAF_4          0x0104U
 #define BLEPIPE_ID_BROADCAST       0xFFFFU
+
+/* Returns non-zero only when node_id is in the twelve-node range. */
+static inline int blepipe_leaf_id_from_node(uint8_t node_id, uint16_t *out_id)
+{
+  if (out_id == NULL || node_id < 1U || node_id > 12U) return 0;
+  *out_id = (uint16_t)(0x0100U + node_id);
+  return 1;
+}
 
 typedef enum {
   BLEPIPE_LANE_DATA_TX = 0,
