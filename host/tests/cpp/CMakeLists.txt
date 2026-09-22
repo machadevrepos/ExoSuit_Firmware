@@ -76,3 +76,4 @@ exo_add_test(test_node_runtime_config                 test_node_runtime_config.c
 exo_add_test(test_live_bundle_v2                      test_live_bundle_v2.cpp)
 exo_add_test(test_bridge_frame                         test_bridge_frame.cpp)
 exo_add_test(test_bridge_queues                        test_bridge_queues.cpp)
+exo_add_test(test_bridge_sequence                      test_bridge_sequence.cpp)
