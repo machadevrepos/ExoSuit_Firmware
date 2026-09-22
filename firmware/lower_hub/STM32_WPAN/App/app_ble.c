@@ -33,6 +33,15 @@
 #include "stm32_lpm.h"
 #include "otp.h"
 
+#include <exo/ble/exo_hub_central_client.h>
+
+#include "ble_gap_aci.h"
+#include "ble_gatt_aci.h"
+#include "ble_hci_le.h"
+#include "ble_events.h"
+#include "ble_std.h"
+#include "ble_types.h"
+
 #include "p2p_server_app.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -490,44 +499,27 @@ void APP_BLE_Init(void)
   mutex = 1;
 #endif /* L2CAP_REQUEST_NEW_CONN_PARAM != 0 */
 
-  /**
-   * Initialize P2P Server Application
-   */
-  P2PS_APP_Init();
+  /* U11 is central-only.  The generated P2P server files remain available as
+   * CubeMX regeneration references, but the service is not initialized. */
 
   /* USER CODE BEGIN APP_BLE_Init_3 */
 
   /* USER CODE END APP_BLE_Init_3 */
 
-  /**
-   * Create timer to handle the Advertising Stop
-   */
-  HW_TS_Create(CFG_TIM_PROC_ID_ISR, &(BleApplicationContext.Advertising_mgr_timer_Id), hw_ts_SingleShot, Adv_Cancel_Req);
-  /**
-   * Create timer to handle the Led Switch OFF
-   */
-  HW_TS_Create(CFG_TIM_PROC_ID_ISR, &(BleApplicationContext.SwitchOffGPIO_timer_Id), hw_ts_SingleShot, Switch_OFF_GPIO);
-
-  /**
-   * Make device discoverable
-   */
-  BleApplicationContext.BleApplicationContext_legacy.advtServUUID[0] = NULL;
-  BleApplicationContext.BleApplicationContext_legacy.advtServUUIDlen = 0;
-
-  /* Initialize intervals for reconnexion without intervals update */
-  AdvIntervalMin = CFG_FAST_CONN_ADV_INTERVAL_MIN;
-  AdvIntervalMax = CFG_FAST_CONN_ADV_INTERVAL_MAX;
-
-  /**
-   * Start to Advertise to be connected by P2P Client
-   */
-  Adv_Request(APP_BLE_FAST_ADV);
+  exo_hub_central_client_init();
+  exo_hub_central_client_set_ble_ready();
 
   /* USER CODE BEGIN APP_BLE_Init_2 */
 
   /* USER CODE END APP_BLE_Init_2 */
 
   return;
+}
+
+/* U11 is a central-only bridge.  Do not let the generated service registry
+ * add the unused P2P server service and consume GATT attributes/handlers. */
+void SVCCTL_SvcInit(void)
+{
 }
 
 SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
@@ -572,17 +564,13 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
 
       /* USER CODE BEGIN EVT_DISCONN_COMPLETE_1 */
 
+      exo_hub_central_client_on_disconnection_complete(
+          p_disconnection_complete_event->Connection_Handle,
+          p_disconnection_complete_event->Reason);
+
       /* USER CODE END EVT_DISCONN_COMPLETE_1 */
 
-      /* restart advertising */
-      Adv_Request(APP_BLE_FAST_ADV);
-
-      /**
-       * SPECIFIC to P2P Server APP
-       */
-      HandleNotification.P2P_Evt_Opcode = PEER_DISCON_HANDLE_EVT;
-      HandleNotification.ConnectionHandle = BleApplicationContext.BleApplicationContext_legacy.connectionHandle;
-      P2PS_APP_Notification(&HandleNotification);
+      /* U11 is central-only and does not restart advertising. */
       /* USER CODE BEGIN EVT_DISCONN_COMPLETE */
 
       /* USER CODE END EVT_DISCONN_COMPLETE */
@@ -593,6 +581,28 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
     {
       p_meta_evt = (evt_le_meta_event*) p_event_pckt->data;
       /* USER CODE BEGIN EVT_LE_META_EVENT */
+
+      if (p_meta_evt->subevent == HCI_LE_ADVERTISING_REPORT_SUBEVT_CODE)
+      {
+        const uint8_t *raw_adv = (const uint8_t *)p_meta_evt->data;
+        const uint8_t raw_adv_len = (p_event_pckt->plen > 1U) ?
+                                    (uint8_t)(p_event_pckt->plen - 1U) : 0U;
+        if (raw_adv_len >= 11U && raw_adv[0] != 0U)
+        {
+          Advertising_Report_t report;
+          const uint8_t data_len = raw_adv[9];
+          if (data_len <= 31U && (uint8_t)(10U + data_len) < raw_adv_len)
+          {
+            report.Event_Type = raw_adv[1];
+            report.Address_Type = raw_adv[2];
+            memcpy(report.Address, &raw_adv[3], sizeof(report.Address));
+            report.Length_Data = data_len;
+            report.Data = &raw_adv[10];
+            report.RSSI = raw_adv[10U + data_len];
+            hci_le_advertising_report_event(1U, &report);
+          }
+        }
+      }
 
       /* USER CODE END EVT_LE_META_EVENT */
       switch (p_meta_evt->subevent)
@@ -608,9 +618,25 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
 #endif /* CFG_DEBUG_APP_TRACE != 0 */
 
           /* USER CODE BEGIN EVT_LE_CONN_UPDATE_COMPLETE */
-
+          {
+            const hci_le_connection_update_complete_event_rp0 *event =
+                (const hci_le_connection_update_complete_event_rp0 *)p_meta_evt->data;
+            exo_hub_central_client_on_connection_update_complete(
+                event->Status, event->Connection_Handle, event->Conn_Interval,
+                event->Conn_Latency, event->Supervision_Timeout);
+          }
           /* USER CODE END EVT_LE_CONN_UPDATE_COMPLETE */
           break;
+
+        case HCI_LE_DATA_LENGTH_CHANGE_SUBEVT_CODE:
+        {
+          const hci_le_data_length_change_event_rp0 *event =
+              (const hci_le_data_length_change_event_rp0 *)p_meta_evt->data;
+          exo_hub_central_client_on_data_length_change(
+              event->Connection_Handle, event->MaxTxOctets, event->MaxTxTime,
+              event->MaxRxOctets, event->MaxRxTime);
+          break;
+        }
 
         case HCI_LE_PHY_UPDATE_COMPLETE_SUBEVT_CODE:
           p_evt_le_phy_update_complete = (hci_le_phy_update_complete_event_rp0*)p_meta_evt->data;
@@ -644,6 +670,12 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           }
           /* USER CODE BEGIN EVT_LE_PHY_UPDATE_COMPLETE */
 
+          exo_hub_central_client_on_phy_update_complete(
+              p_evt_le_phy_update_complete->Status,
+              p_evt_le_phy_update_complete->Connection_Handle,
+              p_evt_le_phy_update_complete->TX_PHY,
+              p_evt_le_phy_update_complete->RX_PHY);
+
           /* USER CODE END EVT_LE_PHY_UPDATE_COMPLETE */
           break;
 
@@ -653,8 +685,6 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           /**
            * The connection is done, there is no need anymore to schedule the LP ADV
            */
-
-          HW_TS_Stop(BleApplicationContext.Advertising_mgr_timer_Id);
 
           APP_DBG_MSG(">>== HCI_LE_CONNECTION_COMPLETE_SUBEVT_CODE - Connection handle: 0x%x\n", p_connection_complete_event->Connection_Handle);
           APP_DBG_MSG("     - Connection established with Central: @:%02x:%02x:%02x:%02x:%02x:%02x\n",
@@ -681,13 +711,14 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
             BleApplicationContext.Device_Connection_Status = APP_BLE_CONNECTED_SERVER;
           }
           BleApplicationContext.BleApplicationContext_legacy.connectionHandle = p_connection_complete_event->Connection_Handle;
-          /**
-           * SPECIFIC to P2P Server APP
-           */
-          HandleNotification.P2P_Evt_Opcode = PEER_CONN_HANDLE_EVT;
-          HandleNotification.ConnectionHandle = BleApplicationContext.BleApplicationContext_legacy.connectionHandle;
-          P2PS_APP_Notification(&HandleNotification);
           /* USER CODE BEGIN HCI_EVT_LE_CONN_COMPLETE */
+
+          exo_hub_central_client_on_connection_complete(
+              1U,
+              p_connection_complete_event->Status,
+              p_connection_complete_event->Connection_Handle,
+              p_connection_complete_event->Peer_Address_Type,
+              p_connection_complete_event->Peer_Address);
 
           /* USER CODE END HCI_EVT_LE_CONN_COMPLETE */
           break; /* HCI_LE_CONNECTION_COMPLETE_SUBEVT_CODE */
@@ -709,6 +740,64 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
     case HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE:
       p_blecore_evt = (evt_blecore_aci*) p_event_pckt->data;
       /* USER CODE BEGIN EVT_VENDOR */
+
+      if (p_blecore_evt->ecode == ACI_GAP_PROC_COMPLETE_VSEVT_CODE)
+      {
+        const aci_gap_proc_complete_event_rp0 *event =
+            (const aci_gap_proc_complete_event_rp0 *)p_blecore_evt->data;
+        aci_gap_proc_complete_event(event->Procedure_Code, event->Status,
+                                     event->Data_Length, event->Data);
+      }
+      else if (p_blecore_evt->ecode == ACI_ATT_READ_BY_GROUP_TYPE_RESP_VSEVT_CODE)
+      {
+        const aci_att_read_by_group_type_resp_event_rp0 *event =
+            (const aci_att_read_by_group_type_resp_event_rp0 *)p_blecore_evt->data;
+        aci_att_read_by_group_type_resp_event(event->Connection_Handle,
+                                              event->Attribute_Data_Length,
+                                              event->Data_Length,
+                                              event->Attribute_Data_List);
+      }
+      else if (p_blecore_evt->ecode == ACI_ATT_READ_BY_TYPE_RESP_VSEVT_CODE)
+      {
+        const aci_att_read_by_type_resp_event_rp0 *event =
+            (const aci_att_read_by_type_resp_event_rp0 *)p_blecore_evt->data;
+        aci_att_read_by_type_resp_event(event->Connection_Handle,
+                                        event->Handle_Value_Pair_Length,
+                                        event->Data_Length,
+                                        event->Handle_Value_Pair_Data);
+      }
+      else if (p_blecore_evt->ecode == ACI_GATT_NOTIFICATION_VSEVT_CODE)
+      {
+        const aci_gatt_notification_event_rp0 *event =
+            (const aci_gatt_notification_event_rp0 *)p_blecore_evt->data;
+        aci_gatt_notification_event(event->Connection_Handle,
+                                     event->Attribute_Handle,
+                                     event->Attribute_Value_Length,
+                                     event->Attribute_Value);
+      }
+      else if (p_blecore_evt->ecode == ACI_GATT_INDICATION_VSEVT_CODE)
+      {
+        const aci_gatt_indication_event_rp0 *event =
+            (const aci_gatt_indication_event_rp0 *)p_blecore_evt->data;
+        aci_gatt_indication_event(event->Connection_Handle,
+                                  event->Attribute_Handle,
+                                  event->Attribute_Value_Length,
+                                  event->Attribute_Value);
+        (void)aci_gatt_confirm_indication(event->Connection_Handle);
+      }
+      else if (p_blecore_evt->ecode == ACI_ATT_EXCHANGE_MTU_RESP_VSEVT_CODE)
+      {
+        const aci_att_exchange_mtu_resp_event_rp0 *event =
+            (const aci_att_exchange_mtu_resp_event_rp0 *)p_blecore_evt->data;
+        aci_att_exchange_mtu_resp_event(event->Connection_Handle,
+                                        event->Server_RX_MTU);
+      }
+      else if (p_blecore_evt->ecode == ACI_GATT_PROC_COMPLETE_VSEVT_CODE)
+      {
+        const aci_gatt_proc_complete_event_rp0 *event =
+            (const aci_gatt_proc_complete_event_rp0 *)p_blecore_evt->data;
+        aci_gatt_proc_complete_event(event->Connection_Handle, event->Error_Code);
+      }
 
       /* USER CODE END EVT_VENDOR */
       switch (p_blecore_evt->ecode)
@@ -774,6 +863,36 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
 APP_BLE_ConnStatus_t APP_BLE_Get_Server_Connection_Status(void)
 {
   return BleApplicationContext.Device_Connection_Status;
+}
+
+/* Hooks used by the shared central state machine.  U11 has no phone-facing
+ * peripheral, so scan preparation is only a role/state gate. */
+void APP_BLE_LeafClientConnecting(void)
+{
+  BleApplicationContext.Device_Connection_Status = APP_BLE_LP_CONNECTING;
+}
+
+void APP_BLE_LeafClientConnectIdle(void)
+{
+  BleApplicationContext.Device_Connection_Status = APP_BLE_IDLE;
+}
+
+uint8_t APP_BLE_LeafClientPrepareScan(void)
+{
+  return 1U;
+}
+
+void APP_BLE_LeafClientScanIdle(void)
+{
+  if (BleApplicationContext.Device_Connection_Status != APP_BLE_CONNECTED_CLIENT)
+  {
+    BleApplicationContext.Device_Connection_Status = APP_BLE_IDLE;
+  }
+}
+
+uint8_t APP_BLE_LeafClientPhoneConnected(void)
+{
+  return 0U;
 }
 
 /* USER CODE BEGIN FD*/
@@ -951,7 +1070,7 @@ static void Ble_Hci_Gap_Gatt_Init(void)
 
   if (role > 0)
   {
-    const char *name = "P2PSRV1";
+    const char *name = CFG_GAP_DEVICE_NAME;
     ret = aci_gap_init(role,
                        CFG_PRIVACY,
                        APPBLE_GAP_DEVICE_NAME_LENGTH,

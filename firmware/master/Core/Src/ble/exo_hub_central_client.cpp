@@ -8,7 +8,11 @@
 
 #include "main.h"
 #include "app_conf.h"
+#ifdef EXO_HUB_LOWER_BUILD
+#include <exo/bridge/frame_codec.h>
+#else
 #include <exo/ble/custom_app.h>
+#endif
 #include "dbg_trace.h"
 /* STM32_WPAN ACI headers are plain C (no __cplusplus guards); give them C
  * linkage explicitly so call sites do not emit mangled references. */
@@ -60,6 +64,29 @@ extern "C" void exo_hub_leaf_control_ingest(uint8_t node_id,
                                          uint8_t msg_type,
                                          const uint8_t *payload,
                                          uint16_t payload_len);
+#ifdef EXO_HUB_LOWER_BUILD
+extern "C" uint8_t exo_lower_hub_bridge_forward(uint8_t lane,
+                                                  const uint8_t *payload,
+                                                  uint16_t payload_len);
+#define EXO_HUB_SEND_CMD_REPORT(id, data, len) 0U
+#define EXO_HUB_SEND_RECORD_FRAME(data, len) 0U
+#define EXO_HUB_SEND_CMD_NOTIFY(data, len) 0U
+#define EXO_HUB_SEND_RECOVERY_FRAME(data, len) 0U
+#else
+#define EXO_HUB_SEND_CMD_REPORT(id, data, len) \
+  Custom_APP_SendCmdReport((id), (data), (len))
+#define EXO_HUB_SEND_RECORD_FRAME(data, len) \
+  Custom_APP_SendRecordFrame((data), (len))
+#define EXO_HUB_SEND_CMD_NOTIFY(data, len) \
+  Custom_APP_SendCmdNotify((data), (len))
+#define EXO_HUB_SEND_RECOVERY_FRAME(data, len) \
+  Custom_APP_SendRecoveryFrame((data), (len))
+extern "C" uint8_t exo_master_bridge_send_blepipe(uint8_t msg_type,
+                                                   uint16_t src_id,
+                                                   uint16_t dst_id,
+                                                   const uint8_t *payload,
+                                                   uint16_t payload_len);
+#endif
 extern "C" uint8_t exo_master_training_owns_node_link(uint8_t node_id);
 extern "C" uint8_t exo_master_training_raw_download_debug_enabled(void);
 extern "C" void exo_master_training_note_suppressed_relay(void);
@@ -67,6 +94,12 @@ extern "C" void exo_master_training_note_suppressed_relay(void);
 /* U9 owns six physical suit nodes; CFG_BLE_NUM_LINK also reserves the phone
  * peripheral link. */
 #define EXO_HUB_LEAF_MAX                 6U
+#ifndef EXO_HUB_LEAF_FIRST_NODE_ID
+#define EXO_HUB_LEAF_FIRST_NODE_ID       1U
+#endif
+#ifndef EXO_HUB_OWNING_HUB
+#define EXO_HUB_OWNING_HUB               exo::HubId::Main
+#endif
 #define EXO_HUB_SCAN_INTERVAL            0x0040U
 #define EXO_HUB_SCAN_WINDOW              0x0030U
 #define EXO_HUB_SCAN_INTERVAL_CONNECTED  0x00A0U
@@ -487,7 +520,7 @@ static void exo_send_disc_report(exo_disc_event_t event_id,
   payload[5] = (uint8_t)((value >> 8U) & 0xFFU);
   payload[6] = exo_hub_central_client_ready_node_mask();
   payload[7] = exo_hub_central_client_transport_ready_node_mask();
-  (void)Custom_APP_SendCmdReport(EXO_HUB_DISC_REPORT_ID, payload, (uint8_t)sizeof(payload));
+  (void)EXO_HUB_SEND_CMD_REPORT(EXO_HUB_DISC_REPORT_ID, payload, (uint8_t)sizeof(payload));
 }
 
 static void exo_report_link_tune(uint8_t slot_index)
@@ -598,7 +631,8 @@ uint8_t exo_hub_central_client_ready_node_mask(void)
         g_leaf_slots[i].app_record_ready != 0U)
     {
       const uint8_t node_id = exo_leaf_slot_node_id(&g_leaf_slots[i]);
-      if (node_id != 0U && node_id < 8U)
+    if (node_id != 0U && node_id >= EXO_HUB_LEAF_FIRST_NODE_ID &&
+        node_id < (uint8_t)(EXO_HUB_LEAF_FIRST_NODE_ID + EXO_HUB_LEAF_MAX))
       {
         mask = (uint8_t)(mask | (uint8_t)(1U << node_id));
       }
@@ -615,7 +649,8 @@ uint32_t exo_hub_central_client_maximum_duration_ms(uint8_t node_mask)
   {
     const exo_leaf_slot_t *slot = &g_leaf_slots[i];
     const uint8_t node_id = exo_leaf_slot_node_id(slot);
-    if (node_id == 0U || node_id >= 8U)
+    if (node_id == 0U || node_id < EXO_HUB_LEAF_FIRST_NODE_ID ||
+        node_id >= (uint8_t)(EXO_HUB_LEAF_FIRST_NODE_ID + EXO_HUB_LEAF_MAX))
     {
       continue;
     }
@@ -648,7 +683,8 @@ uint8_t exo_hub_central_client_transport_ready_node_mask(void)
     if (g_leaf_slots[i].state == EXO_LEAF_SLOT_READY)
     {
       const uint8_t node_id = exo_leaf_slot_node_id(&g_leaf_slots[i]);
-      if (node_id != 0U && node_id < 8U)
+      if (node_id != 0U && node_id >= EXO_HUB_LEAF_FIRST_NODE_ID &&
+          node_id < (uint8_t)(EXO_HUB_LEAF_FIRST_NODE_ID + EXO_HUB_LEAF_MAX))
       {
         mask = (uint8_t)(mask | (uint8_t)(1U << node_id));
       }
@@ -1226,6 +1262,12 @@ static uint8_t exo_suppress_raw_artifact_relay(uint8_t node_id,
                                                 const uint8_t *payload,
                                                 uint16_t length)
 {
+#ifdef EXO_HUB_LOWER_BUILD
+  (void)node_id;
+  (void)payload;
+  (void)length;
+  return 0U;
+#else
   if (node_id == 0U || exo_is_raw_artifact_frame(payload, length) == 0U ||
       exo_master_training_owns_node_link(node_id) == 0U ||
       exo_master_training_raw_download_debug_enabled() != 0U)
@@ -1234,6 +1276,7 @@ static uint8_t exo_suppress_raw_artifact_relay(uint8_t node_id,
   }
   exo_master_training_note_suppressed_relay();
   return 1U;
+#endif
 }
 
 static void exo_clear_app_record_ready_mask(uint8_t mask)
@@ -1246,7 +1289,8 @@ static void exo_clear_app_record_ready_mask(uint8_t mask)
   for (i = 0U; i < EXO_HUB_LEAF_MAX; ++i)
   {
     const uint8_t node_id = exo_leaf_slot_node_id(&g_leaf_slots[i]);
-    if (node_id != 0U && node_id < 8U &&
+    if (node_id != 0U && node_id >= EXO_HUB_LEAF_FIRST_NODE_ID &&
+        node_id < (uint8_t)(EXO_HUB_LEAF_FIRST_NODE_ID + EXO_HUB_LEAF_MAX) &&
         (mask & (uint8_t)(1U << node_id)) != 0U)
     {
       g_leaf_slots[i].app_record_ready = 0U;
@@ -1275,7 +1319,9 @@ static void exo_handle_leaf_status(exo_leaf_slot_t *slot,
     return;
   }
   status_node_id = status.node_id != 0U ? status.node_id : exo_leaf_slot_node_id(slot);
-  if (status_node_id == 0U || status_node_id >= 8U)
+  if (status_node_id == 0U ||
+      status_node_id < EXO_HUB_LEAF_FIRST_NODE_ID ||
+      status_node_id >= (uint8_t)(EXO_HUB_LEAF_FIRST_NODE_ID + EXO_HUB_LEAF_MAX))
   {
     return;
   }
@@ -1388,17 +1434,33 @@ static void exo_handle_pipe_packet(exo_leaf_slot_t *slot,
       {
         return;
       }
-      (void)Custom_APP_SendRecordFrame(data, length);
+#ifdef EXO_HUB_LOWER_BUILD
+      (void)exo_lower_hub_bridge_forward((uint8_t)exo::bridge::Lane::Reliable,
+                                         data, length);
+#else
+      (void)EXO_HUB_SEND_RECORD_FRAME(data, length);
+#endif
     }
     return;
   }
 
   exo_touch_node_from_pipe(slot, &hdr);
 
+#ifdef EXO_HUB_LOWER_BUILD
+  /* U11 is a transport bridge. Preserve the complete BLEPipe frame, including
+   * the node sequence and acquisition timestamp, instead of rebuilding it
+   * from decoded sensor bytes at the hub clock. */
+  (void)exo_lower_hub_bridge_forward(
+      (uint8_t)((lane_kind == BLEPIPE_LANE_DATA_TX) ? exo::bridge::Lane::Live
+                                                     : exo::bridge::Lane::Reliable),
+      data, decoded_frame_len);
+  return;
+#endif
+
   if (lane_kind == BLEPIPE_LANE_CONTROL_TX)
   {
     exo_hub_leaf_control_ingest(exo_leaf_slot_node_id(slot), hdr.msg_type, payload, payload_len);
-    (void)Custom_APP_SendCmdNotify(data, decoded_frame_len);
+    (void)EXO_HUB_SEND_CMD_NOTIFY(data, decoded_frame_len);
     return;
   }
   if (lane_kind == BLEPIPE_LANE_STATUS_TX)
@@ -1468,7 +1530,7 @@ static void exo_handle_pipe_packet(exo_leaf_slot_t *slot,
               (unsigned)payload[56]);
     }
     exo_handle_leaf_status(slot, &hdr, payload, payload_len);
-    (void)Custom_APP_SendRecoveryFrame(data, decoded_frame_len);
+    (void)EXO_HUB_SEND_RECOVERY_FRAME(data, decoded_frame_len);
     return;
   }
   if (hdr.msg_type == BLEPIPE_MSG_LEAF_SAMPLE && payload_len >= 3U && payload[0] == 0x03U)
@@ -1542,7 +1604,7 @@ static void exo_handle_pipe_packet(exo_leaf_slot_t *slot,
     {
       return;
     }
-    (void)Custom_APP_SendRecordFrame(payload, (uint8_t)payload_len);
+    (void)EXO_HUB_SEND_RECORD_FRAME(payload, (uint8_t)payload_len);
     return;
   }
 }
@@ -1918,10 +1980,17 @@ uint8_t exo_hub_central_client_broadcast_blepipe(uint8_t msg_type,
                                                  const uint8_t *payload,
                                                  uint16_t payload_len)
 {
-  return (uint8_t)(exo_hub_central_client_broadcast_blepipe_mask(msg_type,
-                                                                 src_id,
-                                                                 payload,
-                                                                 payload_len) != 0U);
+  uint8_t sent = (uint8_t)(exo_hub_central_client_broadcast_blepipe_mask(msg_type,
+                                                                          src_id,
+                                                                          payload,
+                                                                          payload_len) != 0U);
+#ifndef EXO_HUB_LOWER_BUILD
+  if (exo_master_bridge_send_blepipe(msg_type, src_id, BLEPIPE_ID_BROADCAST,
+                                     payload, payload_len) != 0U) {
+    sent = 1U;
+  }
+#endif
+  return sent;
 }
 
 uint8_t exo_hub_central_client_broadcast_blepipe_mask(uint8_t msg_type,
@@ -1973,6 +2042,14 @@ uint8_t exo_hub_central_client_send_blepipe_to_node(uint8_t node_id,
                                                     const uint8_t *payload,
                                                     uint16_t payload_len)
 {
+#ifndef EXO_HUB_LOWER_BUILD
+  if (node_id > 6U && node_id <= 12U) {
+    uint16_t destination = 0U;
+    if (blepipe_leaf_id_from_node(node_id, &destination) == 0) return 0U;
+    return exo_master_bridge_send_blepipe(msg_type, src_id, destination,
+                                          payload, payload_len);
+  }
+#endif
   exo_leaf_slot_t *slot = exo_find_slot_by_node(node_id);
   uint8_t sent;
   if (slot == 0)
@@ -2164,7 +2241,7 @@ void hci_le_advertising_report_event(uint8_t Num_Reports,
 //            (int)(int8_t)Advertising_Report->RSSI);
     return;
   }
-  if (!exo::hub_owns_node(exo::HubId::Main, node_id))
+  if (!exo::hub_owns_node(EXO_HUB_OWNING_HUB, node_id))
   {
     EXO_LOG("[BLE][HUB][DISC] adv ignored unowned node=%u\r\n",
             (unsigned)node_id);
@@ -2640,7 +2717,9 @@ void aci_gatt_proc_complete_event(uint16_t Connection_Handle,
 
 void exo_hub_central_client_request_targeted_reconnect(uint8_t node_id)
 {
-  if (node_id < 1U || node_id > 4U || g_discovery_hold == 0U)
+  if (node_id < EXO_HUB_LEAF_FIRST_NODE_ID ||
+      node_id >= (uint8_t)(EXO_HUB_LEAF_FIRST_NODE_ID + EXO_HUB_LEAF_MAX) ||
+      g_discovery_hold == 0U)
   {
     return;
   }

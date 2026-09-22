@@ -58,6 +58,7 @@
 #include <exo/ble/custom_app.h>
 #include <exo/ble/app_ble.h>
 #include <exo/ble/exo_hub_central_client.h>
+#include "master_bridge.h"
 #include "stm32wbxx_ll_cortex.h"
 #include "stm32wbxx_ll_exti.h"
 #include "stm32wbxx_ll_pwr.h"
@@ -3331,6 +3332,7 @@ int main(void)
 	MX_I2C3_Init();
 	MX_LPUART1_UART_Init();
 	MX_USART1_Init();
+	exo_master_bridge_init();
 	MX_SPI1_Init();
 	MX_TIM1_Init();
 	if (MX_FATFS_Init() != APP_OK) {
@@ -3578,6 +3580,7 @@ int main(void)
 		leaf_ble_manager.process();
 		exo_hub_central_client_process();
 #endif
+		exo_master_bridge_process();
 		record_sync_process();
 		record_stop_sync_process();
 		drain_leaf_stream_passthrough();
@@ -4438,7 +4441,7 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t S
 
 extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 		{
-	(void) huart;
+	exo_master_bridge_uart_error(huart);
 }
 
 extern "C" void exo_hub_ble_notify_state_trace(uint8_t channel, uint8_t enabled)

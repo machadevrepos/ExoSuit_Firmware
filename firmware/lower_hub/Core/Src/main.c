@@ -28,6 +28,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+void exo_lower_hub_bridge_init(void);
+void exo_lower_hub_bridge_process(void);
+void exo_hub_central_client_process(void);
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -107,6 +111,8 @@ int main(void)
   MX_RF_Init();
   /* USER CODE BEGIN 2 */
 
+  exo_lower_hub_bridge_init();
+
   /* USER CODE END 2 */
 
   /* Init code for STM32_WPAN */
@@ -118,6 +124,8 @@ int main(void)
   {
     /* USER CODE END WHILE */
     MX_APPE_Process();
+    exo_hub_central_client_process();
+    exo_lower_hub_bridge_process();
 
     /* USER CODE BEGIN 3 */
   }

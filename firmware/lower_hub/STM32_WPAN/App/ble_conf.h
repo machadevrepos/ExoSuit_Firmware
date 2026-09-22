@@ -35,13 +35,13 @@
  * This setting shall be set to '1' if the device needs to support the Peripheral Role
  * In the MS configuration, both BLE_CFG_PERIPHERAL and BLE_CFG_CENTRAL shall be set to '1'
  */
-#define BLE_CFG_PERIPHERAL                                                     1
+#define BLE_CFG_PERIPHERAL                                                     0
 
 /**
  * This setting shall be set to '1' if the device needs to support the Central Role
  * In the MS configuration, both BLE_CFG_PERIPHERAL and BLE_CFG_CENTRAL shall be set to '1'
  */
-#define BLE_CFG_CENTRAL                                                        0
+#define BLE_CFG_CENTRAL                                                        1
 
 /**
  * There is one handler per service enabled
@@ -50,7 +50,7 @@
  * This shall take into account all registered handlers
  * (from either the provided services or the custom services)
  */
-#define BLE_CFG_SVC_MAX_NBR_CB                                                 7
+#define BLE_CFG_SVC_MAX_NBR_CB                                                 0
 
 #define BLE_CFG_CLT_MAX_NBR_CB                                                 0
 

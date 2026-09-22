@@ -34,7 +34,10 @@ extern "C" {
 
 extern UART_HandleTypeDef hlpuart1;
 
-extern USART_HandleTypeDef husart1;
+extern UART_HandleTypeDef huart1;
+extern DMA_HandleTypeDef hdma_lpuart1_rx;
+extern DMA_HandleTypeDef hdma_usart1_rx;
+extern DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN Private defines */
 
@@ -42,6 +45,7 @@ extern USART_HandleTypeDef husart1;
 
 void MX_LPUART1_UART_Init(void);
 void MX_USART1_Init(void);
+void MX_USART1_UART_Init(void);
 
 /* USER CODE BEGIN Prototypes */
 
@@ -52,4 +56,3 @@ void MX_USART1_Init(void);
 #endif
 
 #endif /* __USART_H__ */
-
