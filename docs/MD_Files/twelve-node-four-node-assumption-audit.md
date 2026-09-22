@@ -6,7 +6,7 @@ their owning plan task; this file prevents a broad, mixed-purpose replacement.
 
 ## Shared firmware limits to replace
 
-- [ ] `firmware/common/inc/exo/storage/node_runtime_config.h:10,106` —
+- [x] `firmware/common/inc/exo/storage/node_runtime_config.h:10,106` —
   persistent Node ID range is currently 1–4. Owner: Task 3. Preserve ID 0 as
   commissioning/uncommissioned and move the limit to the shared topology
   helpers.
