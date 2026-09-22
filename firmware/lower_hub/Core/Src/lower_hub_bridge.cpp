@@ -12,6 +12,7 @@
 #include <exo/bridge/stream_decoder.h>
 #include <exo/protocol/blepipe_proto.h>
 #include <exo/ble/exo_hub_central_client.h>
+#include <exo/types/topology.h>
 
 namespace {
 
@@ -32,6 +33,7 @@ uint32_t g_boot_epoch = 1U;
 uint32_t g_live_sequence = 1U;
 uint32_t g_reliable_sequence = 1U;
 uint32_t g_last_status_ms = 0U;
+uint32_t g_process_counter = 0U;
 bool g_tx_busy = false;
 uint8_t g_tx_buffer[exo::bridge::kMaxEncodedFrameLength]{};
 uint16_t g_tx_length = 0U;
@@ -177,6 +179,38 @@ void service_tx()
     }
 }
 
+void send_topology_status()
+{
+    blepipe_topology_v2_t status{};
+    status.protocol_version = BLEPIPE_TOPOLOGY_PROTO_VER;
+    status.hub_id = static_cast<uint8_t>(exo::HubId::Lower);
+    status.present_source_mask = exo_hub_central_client_present_source_mask();
+    status.owned_source_mask = exo_hub_central_client_owned_source_mask();
+    status.fault_source_mask = 0U;
+    uint8_t payload[BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN]{};
+    size_t payload_length = 0U;
+    if (blepipe_topology_v2_encode(payload, sizeof(payload), &status,
+                                   &payload_length) != BLEPIPE_STATUS_OK) {
+        return;
+    }
+    blepipe_hdr_t header{};
+    header.proto_ver = BLEPIPE_PROTO_VER;
+    header.msg_type = BLEPIPE_MSG_TOPOLOGY_V2;
+    header.src_id = BLEPIPE_ID_HUB2;
+    header.dst_id = BLEPIPE_ID_HUB;
+    header.seq = g_reliable_sequence;
+    header.timestamp_ms = HAL_GetTick();
+    header.payload_len = static_cast<uint16_t>(payload_length);
+    uint8_t packet[BLEPIPE_MAX_NOTIFY_PAYLOAD]{};
+    size_t packet_length = 0U;
+    if (blepipe_encode(packet, sizeof(packet), &header, payload,
+                       static_cast<uint16_t>(payload_length), &packet_length) ==
+        BLEPIPE_STATUS_OK) {
+        (void)queue_blepipe(exo::bridge::Lane::Reliable, packet,
+                            static_cast<uint16_t>(packet_length));
+    }
+}
+
 }  // namespace
 
 extern "C" void exo_lower_hub_bridge_init(void)
@@ -194,11 +228,13 @@ extern "C" void exo_lower_hub_bridge_init(void)
 
 extern "C" void exo_lower_hub_bridge_process(void)
 {
+    ++g_process_counter;
     service_rx();
     service_tx();
     const uint32_t now = HAL_GetTick();
     if (now - g_last_status_ms >= kStatusPeriodMs) {
         g_last_status_ms = now;
+        send_topology_status();
         const Decoder::Counters &counters = g_decoder.counters();
         exo_ble_debug_printf("[BRIDGE][U11] epoch=%lu rx=%lu bad=%lu qlive=%u qrel=%u ovw=%lu relrej=%lu\r\n",
                              static_cast<unsigned long>(g_boot_epoch),
@@ -209,6 +245,11 @@ extern "C" void exo_lower_hub_bridge_process(void)
                              static_cast<unsigned long>(g_live_queue.overwrite_count()),
                              static_cast<unsigned long>(g_reliable_queue.rejected_count()));
     }
+}
+
+extern "C" uint32_t exo_lower_hub_bridge_progress_counter(void)
+{
+    return g_process_counter;
 }
 
 extern "C" uint8_t exo_lower_hub_bridge_forward(uint8_t lane,

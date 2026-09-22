@@ -15,6 +15,7 @@
 #include <exo/bridge/stream_decoder.h>
 #include <exo/protocol/blepipe_proto.h>
 #include <exo/protocol/live_bundle_v2.h>
+#include <exo/types/topology.h>
 
 namespace {
 
@@ -176,6 +177,20 @@ void dispatch(const exo::bridge::Frame &frame, const uint8_t *packet)
     uint16_t payload_length = 0U;
     if (blepipe_decode(packet, frame.payload_length, &header, &payload,
                        &payload_length) != BLEPIPE_STATUS_OK) return;
+    if (header.msg_type == BLEPIPE_MSG_TOPOLOGY_V2 &&
+        payload_length == BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN) {
+        blepipe_topology_v2_t topology{};
+        if (blepipe_topology_v2_decode(payload, payload_length, &topology) ==
+            BLEPIPE_STATUS_OK && topology.hub_id == static_cast<uint8_t>(exo::HubId::Lower)) {
+            for (uint8_t node_id = 7U; node_id <= 12U; ++node_id) {
+                const uint16_t bit = static_cast<uint16_t>(1U << node_id);
+                if ((topology.present_source_mask & bit) != 0U) {
+                    exo_hub_leaf_topology_touch(node_id);
+                }
+            }
+        }
+        return;
+    }
     const uint8_t node_id = node_id_from_pipe(header);
     if (node_id == 0U) return;
 
@@ -184,6 +199,10 @@ void dispatch(const exo::bridge::Frame &frame, const uint8_t *packet)
         ingest_live(node_id, payload, payload_length);
         break;
     case BLEPIPE_MSG_RAW_FORWARD:
+        /* The lower hub relays both RecordDone manifests and reliable chunks
+         * on this lane. Feed the manifest path first; non-manifest chunks are
+         * harmlessly rejected there and continue to the transfer coordinator. */
+        (void)exo_hub_leaf_record_done_ingest(payload, payload_length);
         exo_hub_leaf_record_frame_ingest(node_id, payload, payload_length);
         (void)Custom_APP_SendRecordFrame(payload,
                                          static_cast<uint8_t>(payload_length));

@@ -120,16 +120,20 @@ const V2 = {
 /** Sources the V1 model consumes. Only these feed preprocessing. */
 export const NODE_IDS = [2, 3, 4];
 
+/** All commissioned leaf IDs supported by the dual-hub topology. */
+export const ALL_NODE_IDS = Array.from({ length: 12 }, (_, index) => index + 1);
+
 /** Master source id in the B1 envelope (firmware kMasterNodeId). */
 export const MASTER_ID = 0;
 
 /**
  * Every source the page will decode and visualize. The Master streams its own
  * BNO/ICM through the same B1 envelope with node_id 0, and Node 1 exists in
- * four-node builds, so both are charted even though the V1 model ignores them.
- * Dropping unknown ids here is what previously made the Master graph dead.
+ * twelve-node builds, so all are charted even though the V1 model ignores
+ * sources outside N2/N3/N4. Dropping unknown ids here is what previously made
+ * relayed lower-hub graphs disappear.
  */
-export const DISPLAY_SOURCE_IDS = [0, 1, 2, 3, 4];
+export const DISPLAY_SOURCE_IDS = [MASTER_ID, ...ALL_NODE_IDS];
 
 export function sourceLabel(sourceId) {
   return sourceId === MASTER_ID ? "MASTER" : `N${sourceId}`;
@@ -582,7 +586,7 @@ export class BleTransport {
   }
 
   async motorPercent(nodeId, percent) {
-    if (!NODE_IDS.includes(nodeId)) throw new Error(`Invalid haptic target node ${nodeId}`);
+    if (!ALL_NODE_IDS.includes(nodeId)) throw new Error(`Invalid haptic target node ${nodeId}`);
     const level = Math.max(0, Math.min(100, Math.round(percent)));
     await this.sendPipeCommand([CMD.SET_ERM, level], BLEPIPE.MSG_COMMAND, nodeId);
   }
@@ -594,7 +598,7 @@ export class BleTransport {
    * the Node rather than clamped.
    */
   async hapticPulse(nodeId, intensityPercent, durationMs, eventId) {
-    if (!NODE_IDS.includes(nodeId)) throw new Error(`Invalid haptic target node ${nodeId}`);
+    if (!ALL_NODE_IDS.includes(nodeId)) throw new Error(`Invalid haptic target node ${nodeId}`);
     const intensity = Math.round(intensityPercent);
     const duration = Math.round(durationMs);
     if (intensity < PULSE_BOUNDS.minIntensityPercent || intensity > PULSE_BOUNDS.maxIntensityPercent) {

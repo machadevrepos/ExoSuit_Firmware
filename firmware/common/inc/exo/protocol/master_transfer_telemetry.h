@@ -5,17 +5,24 @@
 namespace exo {
 
 /* Compact Master 0xB6 report layout. Version 3 changes only the version byte
- * in the v2 prefix and appends benchmark evidence after byte 58. */
+ * in the v2 prefix and appends benchmark evidence after byte 58. Version 4
+ * adds the high bytes of the 16-bit source masks without changing legacy
+ * offsets. */
 struct MasterTransferTelemetryWire {
   static constexpr uint16_t kLegacyLength = 19U;
   static constexpr uint16_t kV2Length = 59U;
   static constexpr uint16_t kV3Length = 69U;
+  static constexpr uint16_t kV4Length = 73U;
   static constexpr uint8_t kVersionOffset = 19U;
   static constexpr uint8_t kVersion3 = 3U;
   static constexpr uint8_t kConfiguredFastIntervalOffset = 59U;
   static constexpr uint8_t kCounterSourceOffset = 60U;
   static constexpr uint8_t kUniqueAcceptedOffset = 61U;
   static constexpr uint8_t kRetransmittedOffset = 65U;
+  static constexpr uint8_t kExpectedMaskHighOffset = 69U;
+  static constexpr uint8_t kCompletedMaskHighOffset = 70U;
+  static constexpr uint8_t kFailedMaskHighOffset = 71U;
+  static constexpr uint8_t kCleanupMaskHighOffset = 72U;
 
   struct V3Fields {
     uint8_t configured_fast_interval = 12U;

@@ -2,7 +2,7 @@
  * UI rendering for the live inference page. All DOM writes live here; main.js
  * owns state and calls render with plain snapshots.
  *
- * Charts follow the four-node preview rule: BLE callbacks only append samples,
+ * Charts follow the multi-source preview rule: BLE callbacks only append samples,
  * and a fixed-rate render loop draws. A source going stale keeps its history.
  */
 

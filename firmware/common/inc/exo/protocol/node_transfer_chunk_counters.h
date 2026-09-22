@@ -17,7 +17,7 @@ class NodeTransferChunkCounters {
   }
 
   constexpr void begin_source(uint8_t source_id) {
-    source_id_ = source_id >= 1U && source_id <= 4U ? source_id : 0U;
+    source_id_ = source_id >= 1U && source_id <= 12U ? source_id : 0U;
     unique_accepted_ = 0U;
     retransmitted_ = 0U;
   }

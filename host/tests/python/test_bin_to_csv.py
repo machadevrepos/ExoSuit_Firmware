@@ -78,6 +78,20 @@ class ConverterTests(unittest.TestCase):
             (root / 'HUBTEST.BIN').write_bytes(b'LOG1')
             self.assertEqual(mod.discover_inputs([root]), [session])
 
+    def test_accepts_two_digit_node_filename_and_header(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'R0042N12.BIN'
+            make_bin(source, node_id=12)
+            header = mod.validate_session(source)
+            self.assertEqual(header.node_id, 12)
+
+    def test_rejects_node_thirteen(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'R0042N13.BIN'
+            make_bin(source, node_id=13)
+            with self.assertRaisesRegex(mod.SessionFormatError, 'invalid node_id 13'):
+                mod.validate_session(source)
+
     def test_rejects_icm_sequence_gap(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

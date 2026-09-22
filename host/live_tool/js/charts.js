@@ -1,7 +1,7 @@
 /**
  * Real-time strip charts for the live session.
  *
- * Rendering is decoupled from BLE callbacks exactly as the four-node preview
+ * Rendering is decoupled from BLE callbacks exactly as the multi-source preview
  * design requires: notifications only append to a ring, and a fixed-rate
  * animation loop draws. A stalled or bursty link changes the trace, never the
  * frame rate, and a source going stale never erases the history already drawn.

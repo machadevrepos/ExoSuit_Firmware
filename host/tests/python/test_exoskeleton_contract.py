@@ -438,6 +438,31 @@ class ExoskeletonTelemetryContractTests(unittest.TestCase):
         self.assertEqual(result["legacyGuess"], 1)
         self.assertEqual(result["legacyPersist"], 4)
 
+    def test_b6_v4_preserves_high_source_mask_bits(self):
+        result = _run_contract(
+            """(() => {
+              const api = globalThis.ExoskeletonTelemetry;
+              const payload = new Uint8Array(73);
+              payload[0] = 5;
+              payload[1] = 0x01;
+              payload[2] = 0x00;
+              payload[9] = 0x00;
+              payload[10] = 0x00;
+              payload[19] = 4;
+              payload[69] = 0x03;
+              payload[70] = 0x01;
+              payload[71] = 0x02;
+              payload[72] = 0x02;
+              return api.decodeTrainingStatusPayload(payload);
+            })()"""
+        )
+
+        self.assertEqual(result["flowVersion"], 4)
+        self.assertEqual(result["expected"], 0x0301)
+        self.assertEqual(result["completed"], 0x0100)
+        self.assertEqual(result["failedSourceMask"], 0x0200)
+        self.assertEqual(result["cleanupPendingMask"], 0x0200)
+
     def test_rate_tracker_wires_exact_attribution_without_v3_guess_fallback(self):
         html = HTML_PATH.read_text(encoding="utf-8-sig")
 

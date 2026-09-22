@@ -1011,6 +1011,9 @@ input[type="checkbox"] {
     const RAW_RELAY_DEBUG_FLAG = 0x02;
     const SUPPORTED_FAST_INTERVAL_UNITS = Object.freeze([12, 9, 6]);
     const DLE_OUTCOMES = ["unknown", "requested", "confirmed", "degraded", "failed"];
+    const MAX_TOPOLOGY_NODE_ID = 12;
+    const validTopologyNodeId = (id) => Number.isInteger(id) &&
+      id >= 1 && id <= MAX_TOPOLOGY_NODE_ID;
     const MASTER_LINK_PHASES = [
       "need_dle", "wait_dle", "need_phy", "wait_phy", "need_interval",
       "wait_interval", "ready", "degraded", "failed"
@@ -1200,19 +1203,20 @@ input[type="checkbox"] {
       const hasStagedTotal = payload.length >= 19;
       const hasFlowV2 = payload.length >= 59 && payload[19] >= 2;
       const hasFlowV3 = payload.length >= 69 && payload[19] >= 3;
+      const hasFlowV4 = payload.length >= 73 && payload[19] >= 4;
       const status = {
         valid: true,
         state: payload[0],
-        expected: payload[1],
-        completed: payload[2],
+        expected: payload[1] | (hasFlowV4 ? (payload[69] << 8) : 0),
+        completed: payload[2] | (hasFlowV4 ? (payload[70] << 8) : 0),
         failureSite: hasFailureSite ? payload[3] : 0xFF,
         failureNode: hasFailureSite ? payload[4] : payload[3],
         stageOp: hasFailureSite ? payload[5] : payload[4],
         stageFr: hasFailureSite ? payload[6] : payload[5],
         csvOp: hasFailureSite ? payload[7] : payload[6],
         csvFr: hasFailureSite ? payload[8] : payload[7],
-        failedSourceMask: hasMasks ? payload[9] : 0,
-        cleanupPendingMask: hasMasks ? payload[10] : 0,
+        failedSourceMask: (hasMasks ? payload[9] : 0) | (hasFlowV4 ? (payload[71] << 8) : 0),
+        cleanupPendingMask: (hasMasks ? payload[10] : 0) | (hasFlowV4 ? (payload[72] << 8) : 0),
         stagedBytes: hasStaged ? readU32(payload, 11) : null,
         stagedTotal: hasStagedTotal ? readU32(payload, 15) : null,
         flowVersion: hasFlowV2 ? payload[19] : null,
@@ -1295,7 +1299,7 @@ input[type="checkbox"] {
         (Number.isFinite(flowVersion) && flowVersion >= 3);
       if (v3Telemetry) {
         const exactNodeId = Number(status?.counterNodeId);
-        return Number.isInteger(exactNodeId) && exactNodeId >= 1 && exactNodeId <= 4
+        return validTopologyNodeId(exactNodeId)
           ? exactNodeId : 0;
       }
 
@@ -1304,12 +1308,12 @@ input[type="checkbox"] {
       // bit remains. Never take this path for a v3 report with an invalid ID.
       const expected = Number(status?.expected) || 0;
       const completed = Number(status?.completed) || 0;
-      const pending = expected & ~completed & 0x1E;
-      for (let nodeId = 1; nodeId <= 4; nodeId += 1) {
+      const pending = expected & ~completed & 0x1FFE;
+      for (let nodeId = 1; nodeId <= MAX_TOPOLOGY_NODE_ID; nodeId += 1) {
         if (pending & (1 << nodeId)) return nodeId;
       }
       const prior = Number(priorNodeId);
-      return Number.isInteger(prior) && prior >= 1 && prior <= 4 ? prior : 0;
+      return validTopologyNodeId(prior) ? prior : 0;
     }
 
     function rawRelayDebugEnabled(flags) {
@@ -1485,12 +1489,14 @@ input[type="checkbox"] {
   function recorderStateLabel(stateValue) {
     return RECORDER_STATES[stateValue] ?? `state${stateValue}`;
   }
+  const MAX_TOPOLOGY_NODE_ID = 12;
+  const validTopologyNodeId = (id) => Number.isInteger(id) && id >= 1 && id <= MAX_TOPOLOGY_NODE_ID;
   // "MASTER+NODE1+NODE2" style label for a source bitmask (bit0=Master,
-  // bits1..4=NODE1..4); matches the coordinator's expected/completed masks.
+  // bits1..12=NODE1..12); matches the coordinator's 16-bit SourceMask.
   function sourceMaskLabel(mask) {
     const names = [];
     if (mask & 0x01) names.push("MASTER");
-    for (let n = 1; n <= 4; n += 1) if (mask & (1 << n)) names.push(`NODE${n}`);
+    for (let n = 1; n <= MAX_TOPOLOGY_NODE_ID; n += 1) if (mask & (1 << n)) names.push(`NODE${n}`);
     return names.length ? names.join("+") : "none";
   }
   const RECORD_START_PHASE = {
@@ -2301,7 +2307,7 @@ input[type="checkbox"] {
   function masterStagedSource(transfer) {
     if (!transfer) return false;
     const nodeId = transfer.nodeId >>> 0;
-    if (nodeId < 1 || nodeId > 4) return false;
+    if (!validTopologyNodeId(nodeId)) return false;
     // Explicit raw relay is an observation-only trace. The Master still
     // owns ACK/credit/verify decisions, even if its first 0xB6 status update has
     // not reached the browser yet.
@@ -2737,15 +2743,15 @@ input[type="checkbox"] {
   function selectedNodeMask() {
     let mask = 0;
     for (const id of state.selectedNodes || []) {
-      if (id >= 1 && id <= 4) mask |= (1 << id);
+      if (validTopologyNodeId(id)) mask |= (1 << id);
     }
-    return mask & 0x1E;
+    return mask & 0x1FFE;
   }
 
   function snapshotExpectedRecordSources(nodeIds, allowAnyLegacyNode = false) {
     const expected = [0];
     for (const id of nodeIds || []) {
-      if (id >= 1 && id <= 4 && !expected.includes(id)) expected.push(id);
+      if (validTopologyNodeId(id) && !expected.includes(id)) expected.push(id);
     }
     expected.sort((a, b) => a - b);
     state.expectedRecordSourceIds = Object.freeze(expected);
@@ -2769,14 +2775,16 @@ input[type="checkbox"] {
   }
 
   function encodeStartSession(sessionId, leadTimeMs, safetyDurationMs, nodeMask, intervalMs) {
-    const bytes = new Uint8Array(19);
+    // StartSessionV2: the 16-bit SourceMask is required for N8..N12.
+    const bytes = new Uint8Array(21);
     const dv = new DataView(bytes.buffer);
-    dv.setUint8(0, 0x0F);
-    dv.setUint32(1, sessionId >>> 0, true);
-    dv.setBigUint64(5, BigInt(leadTimeMs >>> 0) * 1000n, true);
-    dv.setUint32(13, safetyDurationMs >>> 0, true);
-    dv.setUint8(17, nodeMask & 0x1E);
-    dv.setUint8(18, intervalMs & 0xFF);
+    dv.setUint8(0, 0x11);
+    dv.setUint8(1, 0x02);
+    dv.setUint32(2, sessionId >>> 0, true);
+    dv.setBigUint64(6, BigInt(leadTimeMs >>> 0) * 1000n, true);
+    dv.setUint32(14, safetyDurationMs >>> 0, true);
+    dv.setUint16(18, nodeMask & 0x1FFE, true);
+    dv.setUint8(20, intervalMs & 0xFF);
     return bytes;
   }
 
@@ -2797,9 +2805,9 @@ input[type="checkbox"] {
   }
 
   function failedRetryNodeIds() {
-    const failedMask = (state.trainingCsv?.failed ?? 0) & 0x1E;
+    const failedMask = (state.trainingCsv?.failed ?? 0) & 0x1FFE;
     const nodes = [];
-    for (let n = 1; n <= 4; n += 1) if (failedMask & (1 << n)) nodes.push(n);
+    for (let n = 1; n <= MAX_TOPOLOGY_NODE_ID; n += 1) if (failedMask & (1 << n)) nodes.push(n);
     return nodes;
   }
 
@@ -4277,12 +4285,12 @@ input[type="checkbox"] {
     }
     ui.discoveredNodes.textContent = state.discoveredNodes.map((id) => `NODE${id}`).join(", ");
     if (state.selectedNodes.size === 0) {
-      state.discoveredNodes.filter((id) => id >= 1 && id <= 4)
+      state.discoveredNodes.filter((id) => validTopologyNodeId(id))
         .forEach((id) => state.selectedNodes.add(id));
     }
     if (ui.sessionNodes) {
       ui.sessionNodes.innerHTML = "";
-      for (const id of state.discoveredNodes.filter((nodeId) => nodeId >= 1 && nodeId <= 4)) {
+      for (const id of state.discoveredNodes.filter((nodeId) => validTopologyNodeId(nodeId))) {
         const label = document.createElement("label");
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
@@ -4346,7 +4354,7 @@ input[type="checkbox"] {
     masterCard.appendChild(metaRow);
     frag.appendChild(masterCard);
 
-    const nodeIds = (state.discoveredNodes || []).filter((id) => id >= 1 && id <= 4);
+    const nodeIds = (state.discoveredNodes || []).filter((id) => validTopologyNodeId(id));
     if (nodeIds.length === 0) {
       const empty = document.createElement("div");
       empty.className = "device-meta";
@@ -4850,7 +4858,7 @@ input[type="checkbox"] {
   function isExpectedRecordTransfer(sessionId, nodeId) {
     if ((sessionId >>> 0) !== (state.activeRecordSessionId >>> 0)) return false;
     if (nodeId === 0) return true;
-    if (nodeId < 1 || nodeId > 4) return false;
+    if (!validTopologyNodeId(nodeId)) return false;
     if (state.allowAnyLegacyRecordNode) return true;
     return !!state.expectedRecordSourceIds &&
       state.expectedRecordSourceIds.includes(nodeId);

@@ -102,7 +102,7 @@ public:
         }
         reset_state();
         if (done.command != RecordCommand::RecordDone || done.node_id < 1U ||
-                done.node_id > 4U || done.total_size < sizeof(SessionHeader)) {
+                done.node_id > 12U || done.total_size < sizeof(SessionHeader)) {
             return set_error(node_session_staging::NodeSessionStageOperation::InvalidDone,
                     FR_INVALID_PARAMETER);
         }

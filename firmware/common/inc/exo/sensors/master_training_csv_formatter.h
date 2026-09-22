@@ -51,10 +51,13 @@ constexpr uint32_t csv_header_column_count()
     return columns;
 }
 
-constexpr bool source_id_valid(uint8_t source_id) { return source_id <= 4U; }
+constexpr bool source_id_valid(uint8_t source_id) { return source_id <= 12U; }
 inline const char *source_label(uint8_t source_id)
 {
-    static const char *const labels[5] = {"MASTER", "NODE1", "NODE2", "NODE3", "NODE4"};
+    static const char *const labels[13] = {
+        "MASTER", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5", "NODE6",
+        "NODE7", "NODE8", "NODE9", "NODE10", "NODE11", "NODE12"
+    };
     return source_id_valid(source_id) ? labels[source_id] : nullptr;
 }
 

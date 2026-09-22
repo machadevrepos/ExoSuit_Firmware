@@ -156,15 +156,15 @@ void set_sd_flush_time_source(MasterNodeSessionStager::FlushTimeFn time_fn, void
 {
 stager_.set_flush_time_source(time_fn, context);
 }
-bool begin_session(uint32_t session_id, uint8_t expected_source_mask)
+bool begin_session(uint32_t session_id, SourceMask expected_source_mask)
 {
 const bool recoverable_error = partial_finalized_ &&
 (state_ == TrainingCsvState::CsvError || state_ == TrainingCsvState::StageError);
 if (state_ != TrainingCsvState::Idle && state_ != TrainingCsvState::Complete &&
 !recoverable_error) return false;
 if (logger_.has_open_file() || stager_.active()) return false;
-if ((expected_source_mask & 0x01U) == 0U ||
-(expected_source_mask & static_cast<uint8_t>(~0x1FU)) != 0U) return false;
+if ((expected_source_mask & source_bit(0U)) == 0U ||
+(expected_source_mask & static_cast<SourceMask>(~0x1FFFU)) != 0U) return false;
 clear_failure();
 reliable_control_.reset();
 transfer_window_.reset();
@@ -193,7 +193,7 @@ ledger_.reset(session_id);
 state_ = TrainingCsvState::WaitingForMaster;
 return true;
 }
-bool begin_binary_session(uint32_t session_id, uint8_t expected_source_mask, uint16_t file_index)
+bool begin_binary_session(uint32_t session_id, SourceMask expected_source_mask, uint16_t file_index)
 {
 if (file_index == 0U || file_index > 9999U) return false;
 if (!begin_session(session_id, expected_source_mask)) return false;
@@ -244,7 +244,7 @@ return true;
  * transfer owns the link. */
 bool retry_failed_source(uint8_t node_id)
 {
-if (node_id < 1U || node_id > 4U) return false;
+if (node_id < 1U || node_id > 12U) return false;
 if (active_node_id_ != 0U || stager_.active()) return false;
 /* A CRC-mismatch StageError tears the run down (partial_finalized_) with the
  * node's flash copy retained; binary-only runs may re-open that source so the
@@ -254,8 +254,8 @@ binary_only_ && partial_finalized_;
 if (!stage_error_retry &&
 (state_ != TrainingCsvState::WaitingForNode &&
 state_ != TrainingCsvState::Complete)) return false;
-if ((failed_source_mask_ & static_cast<uint8_t>(1U << node_id)) == 0U) return false;
-if ((completed_source_mask_ & static_cast<uint8_t>(1U << node_id)) != 0U) return false;
+if ((failed_source_mask_ & source_bit(node_id)) == 0U) return false;
+if ((completed_source_mask_ & source_bit(node_id)) != 0U) return false;
 if (stage_error_retry) {
 partial_finalized_ = false;
 state_ = TrainingCsvState::WaitingForNode;
@@ -264,8 +264,8 @@ state_ = TrainingCsvState::WaitingForNode;
  * it so the re-pull has a live collection state to stage into. */
 state_ = TrainingCsvState::WaitingForNode;
 }
-failed_source_mask_ = static_cast<uint8_t>(failed_source_mask_ &
-static_cast<uint8_t>(~static_cast<uint8_t>(1U << node_id)));
+failed_source_mask_ = static_cast<SourceMask>(failed_source_mask_ &
+static_cast<SourceMask>(~source_bit(node_id)));
 return true;
 }
 void on_master_finalized(MasterSdSessionRecorder &recorder)
@@ -279,7 +279,7 @@ fail(binary_only_ ? TrainingCsvState::StageError : TrainingCsvState::CsvError, T
 return;
 }
 if (binary_only_) {
-completed_source_mask_ = static_cast<uint8_t>(completed_source_mask_ | 0x01U);
+completed_source_mask_ = static_cast<SourceMask>(completed_source_mask_ | source_bit(0U));
 state_ = ((completed_source_mask_ | failed_source_mask_) & expected_source_mask_) == expected_source_mask_ ?
 TrainingCsvState::Complete : TrainingCsvState::WaitingForNode;
 /* The node stall window must start when node staging can actually begin:
@@ -302,10 +302,10 @@ void on_node_record_done(const RecordDoneMessage &done)
 {
 if (partial_finalized_ || state_ != TrainingCsvState::WaitingForNode ||
 done.command != RecordCommand::RecordDone ||
-done.session_id != active_session_id_ || done.node_id < 1U || done.node_id > 4U ||
-(expected_source_mask_ & static_cast<uint8_t>(1U << done.node_id)) == 0U ||
-(completed_source_mask_ & static_cast<uint8_t>(1U << done.node_id)) != 0U ||
-(failed_source_mask_ & static_cast<uint8_t>(1U << done.node_id)) != 0U) return;
+done.session_id != active_session_id_ || done.node_id < 1U || done.node_id > 12U ||
+(expected_source_mask_ & source_bit(done.node_id)) == 0U ||
+(completed_source_mask_ & source_bit(done.node_id)) != 0U ||
+(failed_source_mask_ & source_bit(done.node_id)) != 0U) return;
 if (!stager_.begin(done, binary_only_ ? file_index_ : logger_.file_index())) {
 fail(TrainingCsvState::StageError, TrainingFailSite::Site2);
 return;
@@ -333,7 +333,7 @@ void on_node_reliable_frame(uint8_t node_id, const uint8_t *frame, uint16_t leng
 uint32_t now_ms)
 {
 if (partial_finalized_ || frame == nullptr ||
-length < sizeof(RecordReliableFrameHeader) || node_id < 1U || node_id > 4U) return;
+length < sizeof(RecordReliableFrameHeader) || node_id < 1U || node_id > 12U) return;
 RecordReliableFrameHeader header{};
 memcpy(&header, frame, sizeof(header));
 if (header.command != RecordCommand::ReliableFrame ||
@@ -447,10 +447,10 @@ void finalize_partial(uint32_t now_ms)
 {
 if (partial_finalized_) return;
 partial_finalized_ = true;
-if (active_node_id_ >= 1U && active_node_id_ <= 4U) {
+if (active_node_id_ >= 1U && active_node_id_ <= 12U) {
 /* The torn-down source never completed: mark it failed so the status masks
  * and the re-pull path describe it truthfully. */
-failed_source_mask_ |= static_cast<uint8_t>(1U << active_node_id_);
+failed_source_mask_ |= source_bit(active_node_id_);
 }
 if (!binary_only_) (void)logger_.shutdown(now_ms);
 	/* A failed stage must not leave a truncated R####N#.BIN that consumes the run
@@ -551,7 +551,7 @@ else (void)reliable_control_.rearm_ack_window(now_ms, ack_timeout_ms_);
 break;
 case TrainingCsvState::BinaryFinalizeNode:
 if ((now_ms - last_progress_ms_) >= kNodeStallMs) {
-cleanup_pending_mask_ = static_cast<uint8_t>(cleanup_pending_mask_ | static_cast<uint8_t>(1U << active_node_id_));
+cleanup_pending_mask_ = static_cast<SourceMask>(cleanup_pending_mask_ | source_bit(active_node_id_));
 reliable_control_.reset();
 complete_binary_node(now_ms);
 }
@@ -596,14 +596,14 @@ uint8_t active_node_id() const { return active_node_id_; }
  * outside an active node transfer. */
 uint32_t active_staged_bytes() const { return stager_.staged_size(); }
 uint32_t active_staged_total() const { return stager_.total_size(); }
-uint8_t expected_source_mask() const { return expected_source_mask_; }
-uint8_t completed_source_mask() const { return completed_source_mask_; }
+SourceMask expected_source_mask() const { return expected_source_mask_; }
+SourceMask completed_source_mask() const { return completed_source_mask_; }
 bool binary_only() const { return binary_only_; }
 uint16_t file_index() const { return binary_only_ ? file_index_ : logger_.file_index(); }
-uint8_t cleanup_pending_mask() const { return cleanup_pending_mask_; }
+SourceMask cleanup_pending_mask() const { return cleanup_pending_mask_; }
 /* Expected sources that were written off after stalling. Non-zero means the
  * published CSV is missing those sources' rows. */
-uint8_t failed_source_mask() const { return failed_source_mask_; }
+SourceMask failed_source_mask() const { return failed_source_mask_; }
 uint32_t ledger_count() const { return ledger_.icm_count(); }
 uint32_t master_bno_index() const { return master_bno_index_; }
 uint32_t master_icm_index() const { return master_icm_index_; }
@@ -640,7 +640,7 @@ if (suppressed_relay_count_ < UINT32_MAX) ++suppressed_relay_count_;
 }
 bool owns_node_link(uint16_t source_id) const
 {
-if (source_id < 1U || source_id > 4U) return false;
+if (source_id < 1U || source_id > 12U) return false;
 switch (state_) {
 case TrainingCsvState::Idle:
 case TrainingCsvState::Complete:
@@ -650,7 +650,7 @@ return false;
 default:
 break;
 }
-const uint8_t source_bit = static_cast<uint8_t>(1U << source_id);
+const SourceMask source_bit = exo::source_bit(source_id);
 return (expected_source_mask_ & source_bit) != 0U &&
 (completed_source_mask_ & source_bit) == 0U &&
 (failed_source_mask_ & source_bit) == 0U;
@@ -889,18 +889,18 @@ fail(TrainingCsvState::StageError, TrainingFailSite::Site18);
 return;
 }
 if (!reliable_control_.verify_ok(payload_crc32)) {
-cleanup_pending_mask_ = static_cast<uint8_t>(cleanup_pending_mask_ | static_cast<uint8_t>(1U << node_id));
+cleanup_pending_mask_ = static_cast<SourceMask>(cleanup_pending_mask_ | source_bit(node_id));
 }
 state_ = TrainingCsvState::BinaryFinalizeNode;
 }
 void complete_binary_node(uint32_t now_ms)
 {
-if (active_node_id_ < 1U || active_node_id_ > 4U) {
+if (active_node_id_ < 1U || active_node_id_ > 12U) {
 fail(TrainingCsvState::StageError, TrainingFailSite::Site18);
 return;
 }
-completed_source_mask_ = static_cast<uint8_t>(completed_source_mask_ |
-static_cast<uint8_t>(1U << active_node_id_));
+completed_source_mask_ = static_cast<SourceMask>(completed_source_mask_ |
+source_bit(active_node_id_));
 active_node_id_ = 0U;
 transfer_window_.reset();
 reliable_control_.reset();
@@ -924,7 +924,7 @@ settle_after_source(now_ms);
  * other, so an unreachable node cannot hold the file open forever. */
 void settle_after_source(uint32_t now_ms)
 {
-const uint8_t resolved = static_cast<uint8_t>(completed_source_mask_ | failed_source_mask_);
+const SourceMask resolved = static_cast<SourceMask>(completed_source_mask_ | failed_source_mask_);
 if (binary_only_) {
 state_ = ((resolved & expected_source_mask_) == expected_source_mask_) ?
 TrainingCsvState::Complete : TrainingCsvState::WaitingForNode;
@@ -943,8 +943,8 @@ last_progress_ms_ = 0U;
 void abandon_active_node(uint32_t now_ms)
 {
 const uint8_t node_id = active_node_id_;
-if (node_id >= 1U && node_id <= 4U) {
-failed_source_mask_ |= static_cast<uint8_t>(1U << node_id);
+if (node_id >= 1U && node_id <= 12U) {
+failed_source_mask_ |= source_bit(node_id);
 /* Keep the first stall visible for diagnostics without failing the run. */
 if (failure_site_ == TrainingFailSite::None) {
 failure_site_ = TrainingFailSite::SessionStall;
@@ -968,8 +968,8 @@ settle_after_source(now_ms);
 }
 void abandon_remaining_nodes(uint32_t now_ms)
 {
-const uint8_t unresolved = static_cast<uint8_t>(expected_source_mask_ &
-~static_cast<uint8_t>(completed_source_mask_ | failed_source_mask_));
+const SourceMask unresolved = static_cast<SourceMask>(expected_source_mask_ &
+~static_cast<SourceMask>(completed_source_mask_ | failed_source_mask_));
 if (unresolved == 0U) return;
 failed_source_mask_ |= unresolved;
 if (failure_site_ == TrainingFailSite::None) {
@@ -1009,9 +1009,9 @@ uint32_t master_bno_index_ = 0U;
 uint32_t master_icm_index_ = 0U;
 uint32_t node_bno_index_ = 0U;
 uint32_t node_icm_index_ = 0U;
-uint8_t expected_source_mask_ = 0U;
-uint8_t completed_source_mask_ = 0U;
-uint8_t failed_source_mask_ = 0U;
+SourceMask expected_source_mask_ = 0U;
+SourceMask completed_source_mask_ = 0U;
+SourceMask failed_source_mask_ = 0U;
 uint8_t active_node_id_ = 0U;
 uint8_t receiver_credit_ = kNodeReceiverCredit;
 uint8_t ack_chunk_threshold_ = kDefaultAckChunkThreshold;
@@ -1025,7 +1025,7 @@ static constexpr bool binary_only_ = true;
 bool binary_only_ = false;
 #endif
 uint16_t file_index_ = 0U;
-uint8_t cleanup_pending_mask_ = 0U;
+SourceMask cleanup_pending_mask_ = 0U;
 bool master_ledger_matches_ = false;
 uint32_t last_progress_ms_ = 0U;
 uint32_t progress_seq_ = 0U;

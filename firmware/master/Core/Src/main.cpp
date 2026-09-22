@@ -58,6 +58,7 @@
 #include <exo/ble/custom_app.h>
 #include <exo/ble/app_ble.h>
 #include <exo/ble/exo_hub_central_client.h>
+#include <exo/ble/exo_hub_leaf_bridge.h>
 #include "master_bridge.h"
 #include "stm32wbxx_ll_cortex.h"
 #include "stm32wbxx_ll_exti.h"
@@ -113,7 +114,7 @@ static exo::MasterImuCsvLogger master_imu_csv_logger;
 static exo::MasterTrainingCsvCoordinator master_training_csv_coordinator;
 static exo::MasterBinarySessionIndex master_binary_session_index;
 static exo::TrainingCsvState master_training_csv_reported_state = exo::TrainingCsvState::Idle;
-static uint8_t master_training_csv_reported_completed_mask = 0U;
+static exo::SourceMask master_training_csv_reported_completed_mask = 0U;
 static bool master_training_csv_reported_partial = false;
 /* Throttle for the periodic node-upload progress report emitted during
  * ReceiveNode: the coordinator only changes state/mask at node boundaries, so
@@ -421,8 +422,8 @@ namespace {
 	static exo::RecordDoneMessage g_seen_node_done_queue[kPendingNodeDoneQueueSize] { };
 	static uint8_t g_seen_node_done_head = 0U;
 	static uint8_t g_seen_node_done_count = 0U;
-	static exo::RecordDoneMessage g_training_node_done[4] { };
-	static bool g_training_node_done_valid[4] { };
+	static exo::RecordDoneMessage g_training_node_done[12] { };
+	static bool g_training_node_done_valid[12] { };
 	struct TrainingPendingVerifyOk {
 		bool valid;
 		exo::RecordReliableVerifyPayload verify;
@@ -436,7 +437,7 @@ namespace {
 	 * what forces a manual "Reset Retained Sessions" before the next run. */
 	static constexpr uint8_t kVerifyOkReleaseMaxAttempts = 40U;
 	static constexpr uint32_t kVerifyOkReleaseRetryMs = 250U;
-	static TrainingPendingVerifyOk g_training_pending_verify_ok[4] { };
+	static TrainingPendingVerifyOk g_training_pending_verify_ok[12] { };
 	static uint32_t g_pending_node_manifest_last_tick = 0U;
 	static uint32_t g_pending_node_defer_last_log_ms = 0U;
 	static bool g_remote_transfer_active = false;
@@ -457,14 +458,14 @@ namespace {
 	struct RecordSyncState {
 			bool active = false;
 			exo::StartRecordMessage message { };
-			uint8_t target_mask = 0U;
-			uint8_t prepared_mask = 0U;
-			uint8_t failed_mask = 0U;
+			exo::SourceMask target_mask = 0U;
+			exo::SourceMask prepared_mask = 0U;
+			exo::SourceMask failed_mask = 0U;
 			uint32_t deadline_ms = 0U;
 			bool prepare_sent = false;
 			RecordSyncPhoneAckMode ack_mode = RecordSyncPhoneAckMode::None;
 			blepipe_hdr_t request_hdr { };
-			uint8_t raw_payload[sizeof(exo::StartRecordMessage)] { };
+			uint8_t raw_payload[sizeof(exo::StartSessionV2Message)] { };
 			uint8_t raw_len = 0U;
 			uint8_t command_id = kRecordSyncNoCommand;
 			uint8_t heartbeat_phase = 0U;
@@ -476,9 +477,9 @@ namespace {
 	struct RecordStopSyncState {
 		bool active = false;
 		exo::StopRecordMessage message { };
-		uint8_t target_mask = 0U;
-		uint8_t ack_mask = 0U;
-		uint8_t ever_sent_mask = 0U;
+		exo::SourceMask target_mask = 0U;
+		exo::SourceMask ack_mask = 0U;
+		exo::SourceMask ever_sent_mask = 0U;
 		uint32_t started_ms = 0U;
 		uint32_t last_send_ms = 0U;
 		uint16_t send_attempts = 0U;
@@ -489,7 +490,7 @@ namespace {
 	static bool g_local_stop_requested = false;
 	static bool g_local_stop_waiting_for_nodes = false;
 	static uint32_t g_local_finalize_duration_ms = 0U;
-	static uint8_t g_active_session_node_mask = 0U;
+	static exo::SourceMask g_active_session_node_mask = 0U;
 	static uint32_t g_active_session_id = 0U;
 	static uint16_t g_active_session_file_index = 0U;
 	static exo::MasterSdSessionRecorder g_local_session_recorder { };
@@ -865,8 +866,8 @@ namespace {
 
 	static void poweroff_pcb_and_wait_for_release()
 	{
-		const uint8_t training_expected_mask = master_training_csv_coordinator.expected_source_mask();
-		const uint8_t training_completed_mask = master_training_csv_coordinator.completed_source_mask();
+		const exo::SourceMask training_expected_mask = master_training_csv_coordinator.expected_source_mask();
+		const exo::SourceMask training_completed_mask = master_training_csv_coordinator.completed_source_mask();
 		if (training_expected_mask != 0U &&
 				(training_completed_mask & training_expected_mask) != training_expected_mask) {
 			EXO_LOG("[TRAIN][CSV] incomplete sess=%lu exp=0x%02X done=0x%02X\r\n",
@@ -1033,7 +1034,7 @@ namespace {
 			g_master_live_tx_gate.on_transport_available();
 			leaf_ble_manager.on_live_transport_available(now_ms);
 		}
-		exo::ble_hub::HubLeafBleManager::LiveSample sample { };
+		exo::ble_hub::HubLeafBleManagerU9::LiveSample sample { };
 		/* Streaming off / a node upload owns the links: flush one stale sample
 		 * per pass so a restart does not replay a backlog, then bail. */
 		if (!g_ble_stream_enabled ||
@@ -1377,7 +1378,7 @@ namespace {
 		}
 		const uint32_t session_id = master_training_csv_coordinator.active_session_id();
 		if (!g_have_pending_node_done || g_pending_node_done.session_id != session_id ||
-				g_pending_node_done.node_id < 1U || g_pending_node_done.node_id > 4U) {
+				g_pending_node_done.node_id < 1U || g_pending_node_done.node_id > 12U) {
 			return;
 		}
 		const uint8_t index = static_cast<uint8_t>(g_pending_node_done.node_id - 1U);
@@ -1419,9 +1420,9 @@ namespace {
 	static bool master_training_csv_node_manifest_ready(const exo::RecordDoneMessage &done)
 	{
 		if (master_training_csv_coordinator.active_session_id() != done.session_id ||
-				done.node_id < 1U || done.node_id > 4U ||
+				done.node_id < 1U || done.node_id > 12U ||
 				(master_training_csv_coordinator.expected_source_mask() &
-						static_cast<uint8_t>(1U << done.node_id)) == 0U) {
+						exo::source_bit(static_cast<uint8_t>(done.node_id))) == 0U) {
 			return true;
 		}
 		master_training_csv_replay_pending_node_done();
@@ -1545,7 +1546,7 @@ namespace {
 	 * same staged-file index. */
 	static uint8_t master_retry_failed_source(uint8_t node_id)
 			{
-		if (node_id < 1U || node_id > 4U) {
+		if (node_id < 1U || node_id > 12U) {
 			return 0U;
 		}
 		const exo::RecordDoneMessage done = g_training_node_done[node_id - 1U];
@@ -1554,7 +1555,7 @@ namespace {
 			return 0U;
 		}
 		if ((master_training_csv_coordinator.completed_source_mask() &
-				static_cast<uint8_t>(1U << node_id)) != 0U) {
+				exo::source_bit(node_id)) != 0U) {
 			return 0U;
 		}
 		if (!master_training_csv_coordinator.retry_failed_source(node_id)) {
@@ -1578,10 +1579,10 @@ namespace {
 
 	static void ble_send_discovered_nodes_report()
 	{
-		uint8_t discovered[8] = { 0U };
+		uint8_t discovered[12] = { 0U };
 		const uint8_t count = leaf_ble_manager.copy_discovered_node_ids(
 				discovered, static_cast<uint8_t>(sizeof(discovered)));
-		uint8_t report[9] = { 0U };
+		uint8_t report[13] = { 0U };
 		report[0] = count;
 		for (uint8_t i = 0U; i < count && i < (uint8_t) (sizeof(report) - 1U); ++i) {
 			report[1U + i] = discovered[i];
@@ -1719,20 +1720,20 @@ namespace {
 				payload_len);
 	}
 
-	static uint8_t record_sync_node_bit(uint8_t node_id)
+		static exo::SourceMask record_sync_node_bit(uint8_t node_id)
 			{
-		return node_id < 8U ? static_cast<uint8_t>(1U << node_id) : 0U;
+		return node_id <= exo::kLastNodeId ? exo::source_bit(node_id) : 0U;
 	}
 
-	static uint8_t record_sync_send_to_target_mask(uint8_t target_mask,
+	static exo::SourceMask record_sync_send_to_target_mask(exo::SourceMask target_mask,
 			uint8_t msg_type,
 			uint16_t src_id,
 			const uint8_t *payload,
 			uint16_t payload_len)
 			{
-		uint8_t sent_mask = 0U;
-		for (uint8_t node_id = 1U; node_id < 8U; ++node_id) {
-			const uint8_t bit = record_sync_node_bit(node_id);
+		exo::SourceMask sent_mask = 0U;
+		for (uint8_t node_id = 1U; node_id <= exo::kLastNodeId; ++node_id) {
+			const exo::SourceMask bit = record_sync_node_bit(node_id);
 			if ((target_mask & bit) == 0U) {
 				continue;
 			}
@@ -1741,33 +1742,33 @@ namespace {
 					src_id,
 					payload,
 					payload_len) != 0U) {
-				sent_mask = static_cast<uint8_t>(sent_mask | bit);
+				sent_mask = static_cast<exo::SourceMask>(sent_mask | bit);
 			}
 		}
 		return sent_mask;
 	}
 
-	static uint8_t record_stop_sync_pending_mask()
+	static exo::SourceMask record_stop_sync_pending_mask()
 	{
-		return static_cast<uint8_t>(g_record_stop_sync.target_mask &
+		return static_cast<exo::SourceMask>(g_record_stop_sync.target_mask &
 				~g_record_stop_sync.ack_mask);
 	}
 
 	static void record_stop_sync_send_pending(bool force)
 	{
 		if (!g_record_stop_sync.active) return;
-		const uint8_t pending_mask = record_stop_sync_pending_mask();
+		const exo::SourceMask pending_mask = record_stop_sync_pending_mask();
 		if (pending_mask == 0U) return;
 		const uint32_t now_ms = HAL_GetTick();
 		if (!force && g_record_stop_sync.last_send_ms != 0U &&
 				(now_ms - g_record_stop_sync.last_send_ms) < kRecordStopRetryMs) return;
-		const uint8_t sent_mask = record_sync_send_to_target_mask(pending_mask,
+		const exo::SourceMask sent_mask = record_sync_send_to_target_mask(pending_mask,
 				BLEPIPE_MSG_COMMAND, BLEPIPE_ID_HUB,
 				reinterpret_cast<const uint8_t*>(&g_record_stop_sync.message),
 				static_cast<uint16_t>(sizeof(g_record_stop_sync.message)));
 		g_record_stop_sync.last_send_ms = now_ms;
 		++g_record_stop_sync.send_attempts;
-		g_record_stop_sync.ever_sent_mask = static_cast<uint8_t>(g_record_stop_sync.ever_sent_mask | sent_mask);
+		g_record_stop_sync.ever_sent_mask = static_cast<exo::SourceMask>(g_record_stop_sync.ever_sent_mask | sent_mask);
 		EXO_LOG("[STOP][TX] s=%lu at=%u p=%02X sn=%02X a=%02X\r\n",
 				static_cast<unsigned long>(g_record_stop_sync.message.session_id),
 				static_cast<unsigned>(g_record_stop_sync.send_attempts),
@@ -1775,7 +1776,7 @@ namespace {
 				static_cast<unsigned>(g_record_stop_sync.ack_mask));
 	}
 
-	static bool record_stop_sync_begin(const exo::StopRecordMessage &message, uint8_t target_mask)
+	static bool record_stop_sync_begin(const exo::StopRecordMessage &message, exo::SourceMask target_mask)
 	{
 		if (target_mask == 0U) return true;
 		if (g_record_stop_sync.active) {
@@ -1917,7 +1918,7 @@ namespace {
 					static_cast<int>(master_binary_session_index.last_result()));
 			return false;
 		}
-		const uint8_t expected_mask = exo::session_expected_source_mask(g_record_sync.target_mask);
+		const exo::SourceMask expected_mask = exo::session_expected_source_mask_v2(g_record_sync.target_mask);
 		if (!master_training_csv_coordinator.begin_binary_session(
 				g_record_sync.message.session_id, expected_mask, file_index)) {
 			EXO_LOG("[RECORD][BIN] setup failed session=%lu expected=0x%02X index=%u state=%u\r\n",
@@ -1944,9 +1945,9 @@ namespace {
 			record_sync_abort(1U);
 			return 0U;
 		}
-		const uint8_t prepared_target_mask = static_cast<uint8_t>(g_record_sync.prepared_mask & g_record_sync.target_mask);
+		const exo::SourceMask prepared_target_mask = static_cast<exo::SourceMask>(g_record_sync.prepared_mask & g_record_sync.target_mask);
 		if (g_record_sync.target_mask != 0U && prepared_target_mask != g_record_sync.target_mask) {
-			g_record_sync.failed_mask = static_cast<uint8_t>(g_record_sync.target_mask & ~prepared_target_mask);
+			g_record_sync.failed_mask = static_cast<exo::SourceMask>(g_record_sync.target_mask & ~prepared_target_mask);
 			EXO_LOG("[SYNC] commit blk no_prep s=%lu t=%02X p=%02X m=%02X\r\n",
 					static_cast<unsigned long>(g_record_sync.message.session_id),
 					static_cast<unsigned>(g_record_sync.target_mask),
@@ -1959,7 +1960,7 @@ namespace {
 		exo::StartRecordMessage commit_msg = g_record_sync.message;
 		commit_msg.command = exo::RecordCommand::CommitPreparedRecord;
 		const uint32_t commit_send_ms = HAL_GetTick();
-		const uint8_t commit_mask = g_record_sync.target_mask != 0U ?
+		const exo::SourceMask commit_mask = g_record_sync.target_mask != 0U ?
 																		record_sync_send_to_target_mask(g_record_sync.target_mask,
 																				BLEPIPE_MSG_COMMAND,
 																				BLEPIPE_ID_HUB,
@@ -1967,7 +1968,7 @@ namespace {
 																				static_cast<uint16_t>(sizeof(commit_msg))) :
 																		0U;
 		if (g_record_sync.target_mask != 0U && commit_mask != g_record_sync.target_mask) {
-			g_record_sync.failed_mask = static_cast<uint8_t>(g_record_sync.target_mask & ~commit_mask);
+			g_record_sync.failed_mask = static_cast<exo::SourceMask>(g_record_sync.target_mask & ~commit_mask);
 			EXO_LOG("[BLE][HUB][SYNC] commit send fail sess=%lu tgt=0x%02X cmt=0x%02X\r\n",
 					static_cast<unsigned long>(g_record_sync.message.session_id),
 					static_cast<unsigned>(g_record_sync.target_mask),
@@ -2035,7 +2036,7 @@ namespace {
 		}
 		exo::StartRecordMessage prepare_msg = g_record_sync.message;
 		prepare_msg.command = exo::RecordCommand::PrepareRecord;
-		const uint8_t sent_mask = record_sync_send_to_target_mask(g_record_sync.target_mask,
+		const exo::SourceMask sent_mask = record_sync_send_to_target_mask(g_record_sync.target_mask,
 				BLEPIPE_MSG_COMMAND,
 				BLEPIPE_ID_HUB,
 				reinterpret_cast<const uint8_t*>(&prepare_msg),
@@ -2049,7 +2050,7 @@ namespace {
 				static_cast<unsigned>(sent_mask),
 				static_cast<unsigned long>(kRecordPrepareTimeoutMs));
 		if (sent_mask != g_record_sync.target_mask) {
-			g_record_sync.failed_mask = static_cast<uint8_t>(g_record_sync.target_mask & ~sent_mask);
+			g_record_sync.failed_mask = static_cast<exo::SourceMask>(g_record_sync.target_mask & ~sent_mask);
 			record_sync_abort(1U);
 			return 0U;
 		}
@@ -2061,7 +2062,7 @@ namespace {
 			const blepipe_hdr_t *request_hdr,
 			const uint8_t *raw_payload,
 			uint8_t raw_len,
-			uint8_t requested_node_mask = 0U,
+			exo::SourceMask requested_node_mask = 0U,
 			uint8_t stream_interval_ms = 20U)
 			{
 		record_sync_normalize_message(message);
@@ -2081,17 +2082,18 @@ namespace {
 			}
 			return 0U;
 		}
-		const uint8_t ready_node_mask = exo_hub_central_client_ready_node_mask();
+		const exo::SourceMask ready_node_mask = exo_hub_central_client_ready_node_mask();
+		const exo::SourceMask local_node_mask = static_cast<exo::SourceMask>(ready_node_mask & 0x007EU);
 		if (requested_node_mask != 0U &&
-				(!exo::session_node_mask_valid(requested_node_mask) ||
-				exo::session_missing_node_mask(requested_node_mask, ready_node_mask) != 0U)) {
-			EXO_LOG("[BLE][HUB][SYNC] reject sel=0x%02X rdy=0x%02X miss=0x%02X\r\n",
+				(!exo::session_source_mask_valid(requested_node_mask) ||
+				((requested_node_mask & 0x007EU) & ~local_node_mask) != 0U)) {
+			EXO_LOG("[BLE][HUB][SYNC] reject sel=0x%04X rdy=0x%04X miss=0x%04X\r\n",
 					static_cast<unsigned>(requested_node_mask),
 					static_cast<unsigned>(ready_node_mask),
-					static_cast<unsigned>(exo::session_missing_node_mask(requested_node_mask, ready_node_mask)));
+					static_cast<unsigned>((requested_node_mask & 0x007EU) & ~local_node_mask));
 			return 3U;
 		}
-		if (requested_node_mask != 0U) {
+		if (requested_node_mask != 0U && (requested_node_mask & ~0x007EU) == 0U) {
 			const uint32_t capacity_duration_ms =
 					exo_hub_central_client_maximum_duration_ms(requested_node_mask);
 			if (capacity_duration_ms == 0U) {
@@ -2233,8 +2235,8 @@ namespace {
 		}
 		if (!g_record_sync.prepare_sent) {
 			if (g_record_sync.target_mask == 0U) {
-				const uint8_t ready_mask = exo_hub_central_client_ready_node_mask();
-				const uint8_t transport_mask = exo_hub_central_client_transport_ready_node_mask();
+				const exo::SourceMask ready_mask = exo_hub_central_client_ready_node_mask();
+				const exo::SourceMask transport_mask = exo_hub_central_client_transport_ready_node_mask();
 				if (ready_mask == 0U ||
 						(transport_mask != 0U && ready_mask != transport_mask)) {
 					if ((int32_t) (HAL_GetTick() - g_record_sync.deadline_ms) >= 0) {
@@ -2270,7 +2272,7 @@ namespace {
 		}
 		record_sync_send_heartbeat(BLEPIPE_RECORD_START_PHASE_WAIT_PREPARE_ACK, false);
 		if ((int32_t) (HAL_GetTick() - g_record_sync.deadline_ms) >= 0) {
-			g_record_sync.failed_mask = static_cast<uint8_t>(g_record_sync.target_mask & ~g_record_sync.prepared_mask);
+			g_record_sync.failed_mask = static_cast<exo::SourceMask>(g_record_sync.target_mask & ~g_record_sync.prepared_mask);
 			EXO_LOG("[BLE][HUB][SYNC] prepare timeout session=%lu missing=0x%02X\r\n",
 					static_cast<unsigned long>(g_record_sync.message.session_id),
 					static_cast<unsigned>(g_record_sync.failed_mask));
@@ -2280,11 +2282,11 @@ namespace {
 
 	static void master_blepipe_send_topology(const blepipe_hdr_t *request_hdr)
 			{
-		uint8_t discovered[8] = { 0U };
+		uint8_t discovered[12] = { 0U };
 		const uint8_t count = leaf_ble_manager.copy_discovered_node_ids(
 				discovered,
 				static_cast<uint8_t>(sizeof(discovered)));
-		uint8_t payload[9] = { 0U };
+		uint8_t payload[13] = { 0U };
 		payload[0] = count;
 		for (uint8_t i = 0U; i < count && i < static_cast<uint8_t>(sizeof(payload) - 1U); ++i) {
 			payload[1U + i] = discovered[i];
@@ -2663,6 +2665,40 @@ namespace {
 				}
 				master_blepipe_send_ack(hdr, 0U, payload[0]);
 				return false;
+			case static_cast<uint8_t>(exo::RecordCommand::StartSessionV2):
+				if (length == exo::kStartSessionV2WireSize) {
+					exo::StartSessionV2Message session{};
+					if (!exo::start_session_v2_decode(payload, length, session) ||
+							!exo::session_source_mask_valid(session.selected_source_mask) ||
+							session.safety_duration_ms < 1000U ||
+							session.stream_interval_ms == 0U) {
+						master_blepipe_send_ack(hdr, 0U, payload[0]);
+						return false;
+					}
+					exo::StartRecordMessage message{};
+					message.command = exo::RecordCommand::StartRecord;
+					message.session_id = session.session_id;
+					message.start_timestamp_us = session.start_timestamp_us;
+					message.requested_duration_ms = session.safety_duration_ms;
+					const uint8_t sync_result = record_sync_begin(message,
+							RecordSyncPhoneAckMode::Blepipe,
+							&hdr,
+							payload,
+							static_cast<uint8_t>(sizeof(session)),
+							session.selected_source_mask,
+							session.stream_interval_ms);
+					if (g_record_sync.active) {
+						g_record_sync.command_id = static_cast<uint8_t>(exo::RecordCommand::StartSessionV2);
+					}
+					if (sync_result == 0U || sync_result == 3U) {
+						master_blepipe_send_ack(hdr, 0U, payload[0]);
+						return false;
+					}
+					if (sync_result == 2U) master_blepipe_send_ack(hdr, 1U, payload[0]);
+					return true;
+				}
+				master_blepipe_send_ack(hdr, 0U, payload[0]);
+				return false;
 			case static_cast<uint8_t>(exo::RecordCommand::StopRecord):
 				if (length == sizeof(exo::StopRecordMessage)) {
 					exo::StopRecordMessage message{};
@@ -2703,7 +2739,7 @@ namespace {
 			uint16_t length)
 			{
 		(void) context;
-		if (node_id < 1U || node_id > 4U || frame == nullptr || length == 0U) {
+		if (node_id < 1U || node_id > 12U || frame == nullptr || length == 0U) {
 			return false;
 		}
 		return exo_hub_central_client_send_blepipe_to_node(node_id,
@@ -2776,11 +2812,11 @@ namespace {
 		if (state == exo::TrainingCsvState::Idle || state == exo::TrainingCsvState::Complete) {
 			return false;
 		}
-		if (verify.source_id < 1U || verify.source_id > 4U ||
+		if (verify.source_id < 1U || verify.source_id > 12U ||
 				master_training_csv_coordinator.active_session_id() != verify.session_id) {
 			return false;
 		}
-		const uint8_t source_bit = static_cast<uint8_t>(1U << verify.source_id);
+		const exo::SourceMask source_bit = exo::source_bit(static_cast<uint8_t>(verify.source_id));
 		return (master_training_csv_coordinator.expected_source_mask() & source_bit) != 0U &&
 				(master_training_csv_coordinator.completed_source_mask() & source_bit) == 0U;
 	}
@@ -2854,10 +2890,10 @@ namespace {
 				!master_training_csv_coordinator.logger().published()) {
 			return;
 		}
-		const uint8_t completed_mask = master_training_csv_coordinator.completed_source_mask();
-		for (uint8_t index = 0U; index < 4U; ++index) {
+		const exo::SourceMask completed_mask = master_training_csv_coordinator.completed_source_mask();
+		for (uint8_t index = 0U; index < 12U; ++index) {
 			TrainingPendingVerifyOk &pending = g_training_pending_verify_ok[index];
-			const uint8_t source_bit = static_cast<uint8_t>(1U << (index + 1U));
+			const exo::SourceMask source_bit = exo::source_bit(static_cast<uint8_t>(index + 1U));
 			if (!pending.valid || (completed_mask & source_bit) == 0U) {
 				continue;
 			}
@@ -3452,7 +3488,7 @@ int main(void)
 			master_node_initial_credit_ready, nullptr);
 	master_training_csv_coordinator.set_sd_flush_time_source(master_sd_flush_now_ms, nullptr);
 	{
-		uint8_t discovered[8] = { 0U };
+		uint8_t discovered[12] = { 0U };
 		const uint8_t count = leaf_ble_manager.copy_discovered_node_ids(discovered, static_cast<uint8_t>(sizeof(discovered)));
 		EXO_LOG("BLE leaf discovery: found %u node(s)\r\n", static_cast<unsigned>(count));
 		for (uint8_t i = 0U; i < count; ++i) {
@@ -3615,9 +3651,9 @@ int main(void)
 		const exo::MasterTrainingCsvLogger &training_logger = master_training_csv_coordinator.logger();
 		if (master_training_csv_coordinator.binary_only()) {
 			const uint16_t active_source = leaf_ble_manager.active_source_id();
-			const uint8_t failed_mask = master_training_csv_coordinator.failed_source_mask();
-			if (active_source >= 1U && active_source <= 4U &&
-					(failed_mask & static_cast<uint8_t>(1U << active_source)) != 0U) {
+			const exo::SourceMask failed_mask = master_training_csv_coordinator.failed_source_mask();
+			if (active_source >= 1U && active_source <= 12U &&
+					(failed_mask & exo::source_bit(static_cast<uint8_t>(active_source))) != 0U) {
 				const uint32_t active_session = leaf_ble_manager.active_session_id();
 				if (leaf_ble_manager.on_ble_reliable_cancel(active_session, active_source)) {
 					EXO_LOG("[RECORD][BIN] source failed source=NODE%u retained_on_node=1 failed=0x%02X\r\n",
@@ -3633,11 +3669,11 @@ int main(void)
 					training_logger.path(),
 					static_cast<unsigned>(master_training_csv_coordinator.expected_source_mask()));
 		}
-		const uint8_t training_completed_mask = master_training_csv_coordinator.completed_source_mask();
-		const uint8_t newly_completed_mask = static_cast<uint8_t>(training_completed_mask &
+		const exo::SourceMask training_completed_mask = master_training_csv_coordinator.completed_source_mask();
+		const exo::SourceMask newly_completed_mask = static_cast<exo::SourceMask>(training_completed_mask &
 				~master_training_csv_reported_completed_mask);
-		for (uint8_t source_id = 0U; source_id <= 4U; ++source_id) {
-			if ((newly_completed_mask & static_cast<uint8_t>(1U << source_id)) == 0U) {
+		for (uint8_t source_id = 0U; source_id <= 12U; ++source_id) {
+			if ((newly_completed_mask & exo::source_bit(source_id)) == 0U) {
 				continue;
 			}
 			if (master_training_csv_coordinator.binary_only()) {
@@ -3657,7 +3693,7 @@ int main(void)
 					released = verified && leaf_ble_manager.on_ble_session_complete(
 							done.session_id, source_id, done.payload_crc32);
 				}
-				const uint8_t cleanup_bit = static_cast<uint8_t>(1U << source_id);
+				const exo::SourceMask cleanup_bit = exo::source_bit(source_id);
 				EXO_LOG("[RECORD][BIN] durable NODE%u idx=%u done=0x%02X cln_pend=%u rel=%u\r\n",
 						static_cast<unsigned>(source_id),
 						static_cast<unsigned>(master_training_csv_coordinator.file_index()),
@@ -3683,14 +3719,14 @@ int main(void)
 					training_state == exo::TrainingCsvState::Complete ||
 					training_state == exo::TrainingCsvState::CsvError) {
 				const uint8_t stall_node = master_training_csv_coordinator.failure_node_id();
-				if (stall_node >= 1U && stall_node <= 4U) {
+				if (stall_node >= 1U && stall_node <= 12U) {
 					exo_hub_central_client_set_transfer_timing(stall_node, 0U,
 							g_record_transfer_runtime.configured_fast_interval);
 				}
 			}
 			if (training_state == exo::TrainingCsvState::StageError) {
 				const uint8_t failed_node = master_training_csv_coordinator.failure_node_id();
-				if (failed_node >= 1U && failed_node <= 4U) {
+				if (failed_node >= 1U && failed_node <= 12U) {
 					exo_hub_central_client_set_transfer_timing(failed_node, 0U,
 							g_record_transfer_runtime.configured_fast_interval);
 				}
@@ -3746,18 +3782,26 @@ int main(void)
 			/* Bytes 0-18 retain the legacy state/progress layout and bytes 20-58
 			 * retain the v2 receive-plane aggregate. Version 3 appends configured
 			 * interval and per-source unique/duplicate evidence after byte 58. */
-			uint8_t training_report[exo::MasterTransferTelemetryWire::kV3Length]{};
+			uint8_t training_report[exo::MasterTransferTelemetryWire::kV4Length]{};
 			training_report[0] = static_cast<uint8_t>(training_state);
-			training_report[1] = master_training_csv_coordinator.expected_source_mask();
-			training_report[2] = training_completed_mask;
+			training_report[1] = static_cast<uint8_t>(master_training_csv_coordinator.expected_source_mask());
+			training_report[2] = static_cast<uint8_t>(training_completed_mask);
 			training_report[3] = static_cast<uint8_t>(master_training_csv_coordinator.failure_site());
 			training_report[4] = master_training_csv_coordinator.failure_node_id();
 			training_report[5] = static_cast<uint8_t>(master_training_csv_coordinator.failure_stager_operation());
 			training_report[6] = static_cast<uint8_t>(master_training_csv_coordinator.failure_stager_result());
 			training_report[7] = static_cast<uint8_t>(master_training_csv_coordinator.failure_csv_operation());
 			training_report[8] = static_cast<uint8_t>(master_training_csv_coordinator.failure_csv_result());
-			training_report[9] = master_training_csv_coordinator.failed_source_mask();
-			training_report[10] = master_training_csv_coordinator.cleanup_pending_mask();
+			training_report[9] = static_cast<uint8_t>(master_training_csv_coordinator.failed_source_mask());
+			training_report[10] = static_cast<uint8_t>(master_training_csv_coordinator.cleanup_pending_mask());
+			training_report[exo::MasterTransferTelemetryWire::kExpectedMaskHighOffset] =
+				static_cast<uint8_t>(master_training_csv_coordinator.expected_source_mask() >> 8U);
+			training_report[exo::MasterTransferTelemetryWire::kCompletedMaskHighOffset] =
+				static_cast<uint8_t>(training_completed_mask >> 8U);
+			training_report[exo::MasterTransferTelemetryWire::kFailedMaskHighOffset] =
+				static_cast<uint8_t>(master_training_csv_coordinator.failed_source_mask() >> 8U);
+			training_report[exo::MasterTransferTelemetryWire::kCleanupMaskHighOffset] =
+				static_cast<uint8_t>(master_training_csv_coordinator.cleanup_pending_mask() >> 8U);
 			const uint32_t staged_bytes = master_training_csv_coordinator.active_staged_bytes();
 			const uint32_t staged_total = master_training_csv_coordinator.active_staged_total();
 			training_report[11] = static_cast<uint8_t>(staged_bytes & 0xFFU);
@@ -3768,7 +3812,7 @@ int main(void)
 			training_report[16] = static_cast<uint8_t>((staged_total >> 8) & 0xFFU);
 			training_report[17] = static_cast<uint8_t>((staged_total >> 16) & 0xFFU);
 			training_report[18] = static_cast<uint8_t>((staged_total >> 24) & 0xFFU);
-			training_report[19] = 2U;
+			training_report[19] = 4U;
 			training_report[20] = master_training_csv_coordinator.receiver_credit();
 			training_report[21] = master_training_csv_coordinator.ack_chunk_threshold();
 			const uint16_t ack_timeout = static_cast<uint16_t>(master_training_csv_coordinator.ack_timeout_ms());
@@ -4507,7 +4551,7 @@ extern "C" uint8_t exo_hub_leaf_record_done_ingest(const uint8_t *payload, uint1
 	exo::RecordDoneMessage message { };
 	memcpy(&message, payload, sizeof(message));
 	if (message.command != exo::RecordCommand::RecordDone ||
-			message.node_id < 1U || message.node_id > 4U ||
+			message.node_id < 1U || message.node_id > 12U ||
 			message.session_id == 0U ||
 			message.total_size < sizeof(exo::SessionHeader)) {
 		return 0U;
@@ -4563,12 +4607,12 @@ extern "C" void exo_hub_leaf_control_ingest(uint8_t node_id,
 	}
 	const uint8_t command_id = payload[0];
 	const uint8_t accepted = payload[1];
-	const uint8_t bit = record_sync_node_bit(node_id);
+	const exo::SourceMask bit = record_sync_node_bit(node_id);
 	if (command_id == static_cast<uint8_t>(exo::RecordCommand::StopRecord)) {
 		if (!g_record_stop_sync.active || bit == 0U ||
 				(g_record_stop_sync.target_mask & bit) == 0U) return;
 		if (msg_type == BLEPIPE_MSG_ACK && accepted != 0U) {
-			g_record_stop_sync.ack_mask = static_cast<uint8_t>(g_record_stop_sync.ack_mask | bit);
+			g_record_stop_sync.ack_mask = static_cast<exo::SourceMask>(g_record_stop_sync.ack_mask | bit);
 			EXO_LOG("[BLE][HUB][STOP][ACK] node=%u session=%lu ack=0x%02X target=0x%02X\r\n",
 					static_cast<unsigned>(node_id),
 					static_cast<unsigned long>(g_record_stop_sync.message.session_id),
@@ -4590,13 +4634,13 @@ extern "C" void exo_hub_leaf_control_ingest(uint8_t node_id,
 		return;
 	}
 	if (msg_type == BLEPIPE_MSG_ACK && accepted != 0U) {
-		g_record_sync.prepared_mask = static_cast<uint8_t>(g_record_sync.prepared_mask | bit);
+		g_record_sync.prepared_mask = static_cast<exo::SourceMask>(g_record_sync.prepared_mask | bit);
 		EXO_LOG("[BLE][HUB][SYNC] prepare ACK node=%u prepared=0x%02X target=0x%02X\r\n",
 				static_cast<unsigned>(node_id),
 				static_cast<unsigned>(g_record_sync.prepared_mask),
 				static_cast<unsigned>(g_record_sync.target_mask));
 	} else {
-		g_record_sync.failed_mask = static_cast<uint8_t>(g_record_sync.failed_mask | bit);
+		g_record_sync.failed_mask = static_cast<exo::SourceMask>(g_record_sync.failed_mask | bit);
 		EXO_LOG("[BLE][HUB][SYNC] prepare NACK node=%u msg=0x%02X accepted=%u failed=0x%02X\r\n",
 				static_cast<unsigned>(node_id),
 				static_cast<unsigned>(msg_type),
@@ -4609,7 +4653,7 @@ extern "C" void exo_hub_leaf_topology_touch(uint8_t node_id)
 		{
 	static uint32_t last_topology_mask = 0xFFFFFFFFUL;
 	leaf_ble_manager.touch_node(node_id);
-	uint8_t discovered[8] = { 0U };
+	uint8_t discovered[12] = { 0U };
 	const uint8_t count = leaf_ble_manager.copy_discovered_node_ids(
 			discovered,
 			static_cast<uint8_t>(sizeof(discovered)));
@@ -4959,10 +5003,10 @@ extern "C" uint8_t exo_hub_ble_write(const uint8_t *payload, uint8_t length)
 								EXO_LOG("[BLE][REC][REL] MANIFEST_ACK observer-drop source=%u session=%lu\r\n",
 										static_cast<unsigned>(ack.source_id),
 										static_cast<unsigned long>(ack.session_id));
-							} else if (ack.source_id >= 1U && ack.source_id <= 4U &&
+							} else if (ack.source_id >= 1U && ack.source_id <= 12U &&
 									((master_training_csv_coordinator.completed_source_mask() |
 									  master_training_csv_coordinator.failed_source_mask()) &
-									 static_cast<uint8_t>(1U << ack.source_id)) != 0U) {
+									 exo::source_bit(static_cast<uint8_t>(ack.source_id))) != 0U) {
 								/* The source already resolved (completed or written off):
 								 * re-granting chunk-0 credit would restart chunks into a
 								 * coordinator that now ignores every frame. */

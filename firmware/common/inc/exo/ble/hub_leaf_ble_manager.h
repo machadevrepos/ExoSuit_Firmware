@@ -563,7 +563,11 @@ private:
 /* Preserve the existing four-node API while allowing the same state machine to
  * be instantiated for a six-link hub. */
 using HubLeafBleManager = HubLeafBleManagerCore<4U>;
-using HubLeafBleManagerU9 = HubLeafBleManagerCore<6U, 1U>;
+/* U9 owns the first six physical links, but it also receives forwarded live
+ * and reliable traffic for U11's six nodes. Keep one twelve-source scheduler
+ * state so forwarded RecordDone/VerifyOk frames are not rejected as foreign
+ * sources and live scheduling remains source-aware end to end. */
+using HubLeafBleManagerU9 = HubLeafBleManagerCore<12U, 1U>;
 using HubLeafBleManagerU11 = HubLeafBleManagerCore<6U, 7U>;
 
 } // namespace exo::ble_hub

@@ -7,6 +7,7 @@
 
 #include "ff.h"
 #include <exo/sensors/master_training_csv_formatter.h>
+#include <exo/types/topology.h>
 
 namespace exo {
 namespace training_csv {
@@ -94,7 +95,7 @@ public:
     {
     }
 
-    bool begin(uint32_t session_id, uint8_t expected_source_mask, uint32_t now_ms)
+    bool begin(uint32_t session_id, SourceMask expected_source_mask, uint32_t now_ms)
     {
         if (file_open_) {
             return set_nonterminal(training_csv::TrainingCsvLogOperation::AlreadyStarted,
@@ -104,7 +105,7 @@ public:
         session_id_ = session_id;
         expected_source_mask_ = expected_source_mask;
         if ((expected_source_mask & kMasterSourceBit) == 0U ||
-                (expected_source_mask & static_cast<uint8_t>(~kAllSourceBits)) != 0U) {
+                (expected_source_mask & static_cast<SourceMask>(~kAllSourceBits)) != 0U) {
             return set_terminal(training_csv::TrainingCsvLogOperation::InvalidExpectedMask,
                     FR_INVALID_PARAMETER);
         }
@@ -216,7 +217,7 @@ public:
     bool mark_source_complete(uint8_t source_id, uint32_t now_ms)
     {
         if (!ready_ || !validate_source_id(source_id)) return false;
-        const uint8_t source_bit = static_cast<uint8_t>(1U << source_id);
+        const SourceMask source_bit = source_bit_for(source_id);
         if ((expected_source_mask_ & source_bit) == 0U) {
             return set_nonterminal(training_csv::TrainingCsvLogOperation::SourceNotExpected,
                     FR_INVALID_PARAMETER);
@@ -232,7 +233,7 @@ public:
                     FR_INVALID_PARAMETER);
         }
         if (!flush_buffer() || !synchronize(now_ms)) return false;
-        completed_source_mask_ = static_cast<uint8_t>(completed_source_mask_ | source_bit);
+        completed_source_mask_ = static_cast<SourceMask>(completed_source_mask_ | source_bit);
         return true;
     }
 
@@ -292,8 +293,8 @@ public:
     uint32_t session_id() const { return session_id_; }
     uint16_t file_index() const { return file_index_; }
     bool published() const { return published_; }
-    uint8_t expected_source_mask() const { return expected_source_mask_; }
-    uint8_t completed_source_mask() const { return completed_source_mask_; }
+    SourceMask expected_source_mask() const { return expected_source_mask_; }
+    SourceMask completed_source_mask() const { return completed_source_mask_; }
     uint32_t row_count() const { return row_sequence_; }
     uint32_t bno_count(uint8_t source_id) const
     {
@@ -311,9 +312,9 @@ private:
     static constexpr uint32_t kSyncPeriodMs = 1000U;
     static constexpr size_t kRowBufferBytes = 1024U;
     static constexpr size_t kWriteBufferBytes = 8192U;
-    static constexpr uint8_t kMasterSourceBit = 0x01U;
-    static constexpr uint8_t kAllSourceBits = 0x1FU;
-    static constexpr uint8_t kSourceCount = 5U;
+    static constexpr SourceMask kMasterSourceBit = 0x0001U;
+    static constexpr SourceMask kAllSourceBits = 0x1FFFU;
+    static constexpr uint8_t kSourceCount = 13U;
     static constexpr uint8_t kBnoSensorIndex = 0U;
     static constexpr uint8_t kIcmSensorIndex = 1U;
 
@@ -411,9 +412,9 @@ private:
     bool validate_append_source(uint8_t source_id)
     {
         if (!ready_ || !validate_source_id(source_id)) return false;
-        if ((expected_source_mask_ & static_cast<uint8_t>(1U << source_id)) == 0U)
+        if ((expected_source_mask_ & source_bit_for(source_id)) == 0U)
             return set_nonterminal(training_csv::TrainingCsvLogOperation::SourceNotExpected, FR_INVALID_PARAMETER);
-        if ((completed_source_mask_ & static_cast<uint8_t>(1U << source_id)) != 0U)
+        if ((completed_source_mask_ & source_bit_for(source_id)) != 0U)
             return set_nonterminal(training_csv::TrainingCsvLogOperation::SourceComplete, FR_INVALID_PARAMETER);
         return true;
     }
@@ -473,7 +474,12 @@ private:
     uint64_t previous_timestamp_us_[kSourceCount][2]{};
     bool previous_timestamp_valid_[kSourceCount][2]{};
     uint32_t last_sync_ms_ = 0U; uint32_t session_id_ = 0U; uint32_t row_sequence_ = 0U;
-    uint8_t expected_source_mask_ = 0U; uint8_t completed_source_mask_ = 0U;
+    static SourceMask source_bit_for(uint8_t source_id)
+    {
+        return source_id <= 12U ? static_cast<SourceMask>(1U << source_id) : 0U;
+    }
+
+    SourceMask expected_source_mask_ = 0U; SourceMask completed_source_mask_ = 0U;
     bool file_open_ = false; bool ready_ = false; bool terminal_error_ = false; bool published_ = false;
     uint16_t file_index_ = 0U;
     training_csv::TrainingCsvLogOperation last_operation_ = training_csv::TrainingCsvLogOperation::None;

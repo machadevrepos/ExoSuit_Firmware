@@ -22,6 +22,8 @@ from typing import BinaryIO, Iterable, Iterator
 SESSION_MAGIC = 0x584F5345  # "ESOX"
 SESSION_VERSION = 4
 SESSION_COMPLETE = 0xA5
+MIN_NODE_ID = 1
+MAX_NODE_ID = 12
 SENSOR_BNO85 = 0x01
 SENSOR_ICM45686 = 0x02
 KNOWN_SENSOR_MASK = SENSOR_BNO85 | SENSOR_ICM45686
@@ -29,7 +31,7 @@ HEADER_SIZE = 88
 BNO_SAMPLE_SIZE = 56
 ICM_SAMPLE_SIZE = 20
 HEADER_CRC_OFFSET = 84
-SESSION_FILENAME_RE = re.compile(r"^R\d{4}(?:M|N[1-4])\.BIN$", re.IGNORECASE)
+SESSION_FILENAME_RE = re.compile(r"^R\d{4}(?:M|N(?:[1-9]|1[0-2]))\.BIN$", re.IGNORECASE)
 
 LOSS_FLAGS = {
     0x00000001: "bno_read",
@@ -123,8 +125,10 @@ def validate_session(path: Path) -> SessionHeader:
             raise SessionFormatError(
                 f"session is not finalized (completion_flag=0x{header.completion_flag:02X})"
             )
-        if not 0 <= header.node_id <= 4:
-            raise SessionFormatError(f"invalid node_id {header.node_id}")
+        if not (header.node_id == 0 or MIN_NODE_ID <= header.node_id <= MAX_NODE_ID):
+            raise SessionFormatError(
+                f"invalid node_id {header.node_id}; expected Master 0 or Node {MIN_NODE_ID}..{MAX_NODE_ID}"
+            )
         if header.sensor_mask & ~KNOWN_SENSOR_MASK:
             raise SessionFormatError(f"unknown sensor mask bits 0x{header.sensor_mask:02X}")
         if header.bno85_payload_size != header.bno85_sample_count * BNO_SAMPLE_SIZE:

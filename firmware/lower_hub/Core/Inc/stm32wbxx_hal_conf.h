@@ -42,6 +42,8 @@
 /*#define HAL_I2C_MODULE_ENABLED   */
 #define HAL_IPCC_MODULE_ENABLED
 /*#define HAL_IRDA_MODULE_ENABLED   */
+/* The lower-hub watchdog uses the CMSIS IWDG registers directly because this
+ * Cube package does not ship stm32wbxx_hal_iwdg.c/.h. */
 /*#define HAL_IWDG_MODULE_ENABLED   */
 /*#define HAL_LCD_MODULE_ENABLED   */
 /*#define HAL_LPTIM_MODULE_ENABLED   */

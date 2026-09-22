@@ -62,7 +62,7 @@ public:
             uint8_t credit = kDefaultCredit)
     {
         reset();
-        if (done.node_id < 1U || done.node_id > 4U || done.session_id == 0U ||
+        if (done.node_id < 1U || done.node_id > 12U || done.session_id == 0U ||
                 done.total_size == 0U || chunk_size == 0U) {
             return false;
         }
@@ -179,7 +179,7 @@ public:
 
     bool active() const
     {
-        return node_id_ >= 1U && node_id_ <= 4U && session_id_ != 0U;
+        return node_id_ >= 1U && node_id_ <= 12U && session_id_ != 0U;
     }
     bool pending() const { return pending_length_ != 0U || nack_pending_ || ack_pending_; }
     uint8_t node_id() const { return node_id_; }

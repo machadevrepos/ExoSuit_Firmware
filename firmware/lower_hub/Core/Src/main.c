@@ -24,13 +24,16 @@
 #include "rf.h"
 #include "rtc.h"
 #include "gpio.h"
+#include "iwdg.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
 void exo_lower_hub_bridge_init(void);
 void exo_lower_hub_bridge_process(void);
+uint32_t exo_lower_hub_bridge_progress_counter(void);
 void exo_hub_central_client_process(void);
+uint32_t exo_hub_central_client_progress_counter(void);
 
 /* USER CODE END Includes */
 
@@ -117,15 +120,37 @@ int main(void)
 
   /* Init code for STM32_WPAN */
   MX_APPE_Init();
+  /* Start the watchdog only after BLE, UART/DMA, and bridge startup has
+   * completed. The loop below arms refresh only after both service paths run. */
+  MX_IWDG_Init();
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    static uint32_t last_ble_progress = 0U;
+    static uint32_t last_bridge_progress = 0U;
+    static uint8_t watchdog_armed = 0U;
     /* USER CODE END WHILE */
     MX_APPE_Process();
     exo_hub_central_client_process();
     exo_lower_hub_bridge_process();
+    {
+      const uint32_t ble_progress = exo_hub_central_client_progress_counter();
+      const uint32_t bridge_progress = exo_lower_hub_bridge_progress_counter();
+      if (watchdog_armed == 0U && ble_progress != 0U && bridge_progress != 0U)
+      {
+        watchdog_armed = 1U;
+      }
+      if (watchdog_armed != 0U &&
+          ble_progress != last_ble_progress &&
+          bridge_progress != last_bridge_progress)
+      {
+        exo_lower_hub_iwdg_refresh();
+      }
+      last_ble_progress = ble_progress;
+      last_bridge_progress = bridge_progress;
+    }
 
     /* USER CODE BEGIN 3 */
   }

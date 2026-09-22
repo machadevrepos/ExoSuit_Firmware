@@ -232,6 +232,7 @@ static uint8_t g_discovery_hold = 0U;
 static uint8_t g_targeted_reconnect_node_id = 0U;
 static uint32_t g_targeted_reconnect_after_ms = 0U;
 static uint8_t g_targeted_reconnect_attempts = 0U;
+static uint32_t g_process_counter = 0U;
 static exo::LinkTuneState g_link_tune;
 static exo::TransferLinkRearmState g_transfer_link_rearm;
 
@@ -705,6 +706,34 @@ uint8_t exo_hub_central_client_transport_ready_node_count(void)
     }
   }
   return count;
+}
+
+uint16_t exo_hub_central_client_present_source_mask(void)
+{
+  uint16_t mask = 0U;
+  for (uint8_t i = 0U; i < EXO_HUB_LEAF_MAX; ++i)
+  {
+    const uint8_t node_id = exo_leaf_slot_node_id(&g_leaf_slots[i]);
+    if (node_id != 0U && g_leaf_slots[i].state != EXO_LEAF_SLOT_EMPTY)
+    {
+      mask = static_cast<uint16_t>(mask | exo::source_bit(node_id));
+    }
+  }
+  return mask;
+}
+
+uint16_t exo_hub_central_client_owned_source_mask(void)
+{
+  uint16_t mask = 0U;
+  for (uint8_t node_id = exo::kFirstNodeId;
+       node_id <= exo::kLastNodeId; ++node_id)
+  {
+    if (exo::hub_for_node(node_id) == EXO_HUB_OWNING_HUB)
+    {
+      mask = static_cast<uint16_t>(mask | exo::source_bit(node_id));
+    }
+  }
+  return mask;
 }
 
 static uint8_t exo_parse_leaf_name_id(const uint8_t *name, uint8_t len)
@@ -1827,6 +1856,7 @@ void exo_hub_central_client_set_ble_ready(void)
 void exo_hub_central_client_process(void)
 {
   uint8_t i;
+  ++g_process_counter;
   const uint32_t now = HAL_GetTick();
   {
     const exo::LinkTuneState::Request active = g_link_tune.active_request();
@@ -1963,6 +1993,11 @@ void exo_hub_central_client_process(void)
     }
   }
   exo_request_scan_if_needed();
+}
+
+uint32_t exo_hub_central_client_progress_counter(void)
+{
+  return g_process_counter;
 }
 
 void exo_hub_central_client_request_scan(void)

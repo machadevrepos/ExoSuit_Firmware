@@ -27,7 +27,7 @@ public:
             uint16_t chunk_size)
     {
         reset();
-        if (node_id < 1U || node_id > 4U || session_id == 0U ||
+        if (node_id < 1U || node_id > 12U || session_id == 0U ||
                 total_size == 0U || chunk_size == 0U) {
             return false;
         }

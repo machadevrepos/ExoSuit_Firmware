@@ -122,7 +122,7 @@ cmake -S host/tests/cpp -B host/tests/cpp/build && cmake --build host/tests/cpp/
 ## Live visualization
 
 Every source the Master relays is charted, including the Master itself
-(`node_id` 0) and Node 1 in four-node builds. Only N2/N3/N4 feed the model:
+(`node_id` 0) and Nodes 1–12 in dual-hub builds. Only N2/N3/N4 feed the model:
 display-only sources never gate inference, so a missing or stale Master never
 degrades a session.
 

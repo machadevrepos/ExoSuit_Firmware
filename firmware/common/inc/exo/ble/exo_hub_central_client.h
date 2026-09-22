@@ -13,6 +13,8 @@ void exo_ble_debug_printf(const char *fmt, ...);
 void exo_hub_central_client_init(void);
 void exo_hub_central_client_set_ble_ready(void);
 void exo_hub_central_client_process(void);
+/* Monotonic superloop progress marker used by the lower-hub watchdog. */
+uint32_t exo_hub_central_client_progress_counter(void);
 void exo_hub_central_client_request_scan(void);
 void exo_hub_central_client_set_discovery_hold(uint8_t hold);
 /* Arm one direct-address re-connect of a dropped Node while discovery is
@@ -66,6 +68,8 @@ uint32_t exo_hub_central_client_maximum_duration_ms(uint8_t node_mask);
 uint8_t exo_hub_central_client_ready_node_count(void);
 uint8_t exo_hub_central_client_transport_ready_node_mask(void);
 uint8_t exo_hub_central_client_transport_ready_node_count(void);
+uint16_t exo_hub_central_client_present_source_mask(void);
+uint16_t exo_hub_central_client_owned_source_mask(void);
 
 void exo_hub_central_client_on_connection_complete(uint8_t initiated_as_client,
                                                    uint8_t status,
