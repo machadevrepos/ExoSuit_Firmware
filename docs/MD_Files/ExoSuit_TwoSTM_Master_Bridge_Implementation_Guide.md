@@ -30,7 +30,7 @@
 - **Decision (§3):** U9 ("Main MCU" in schematic, runs today's firmware) stays the **main/app-facing MCU**: upper-body 6 nodes + phone/app link (7 BLE links). U11 ("Sensor MCU", currently idle) becomes the **lower-body hub**: 6 nodes → UART relay to U9. Swapping the roles was evaluated and rejected (§3.3).
 - The inter-MCU link is almost certainly **USART1 on pins PB6/PB7** (configured synchronous with CK on PA8 in `Master.ioc` — a master-clocked USART only makes sense chip-to-chip). ⚠️ UNVERIFIED: continuity check U1.
 - The UART bridge reuses the existing `blepipe` framing (20 B header + CRC16-CCITT, 222 B max payload) so U9's parser can consume lower-body packets with existing code (§5).
-- Bandwidth is **not** the bottleneck: 12 nodes @ 100 Hz ≈ 30 KB/s aggregate vs 92 KB/s UART capacity and ≈ 733 kbps measured BLE capacity (§4). Link count, airtime scheduling, and dual-radio contention on the shared PCB are the real risks (§8).
+- Bandwidth is **not** the bottleneck for the required 25 Hz BNO+ICM live profile: 12 nodes produce roughly 7.4 KB/s of raw sensor data before envelopes, versus 92 KB/s UART capacity and ≈ 733 kbps measured BLE capacity (§4). A 50 Hz profile is a separately gated stretch experiment; link count, airtime scheduling, and dual-radio contention on the shared PCB remain the real risks (§8).
 - Validation is phased with hard gates (§7). Phase 1 (UART bring-up, no nodes needed) answers "can this work?" within ~1–2 weeks. The PCB order decision is gated on a 24 h soak (Phase 4).
 
 ---
@@ -152,11 +152,11 @@ The proposal "make the idle UART-only STM the main" was analyzed and rejected:
 
 | Segment | Load | Capacity | Utilization |
 |---|---|---|---|
-| U11 → U9 UART | lower 6 nodes @ 100 Hz × 20 B = 12 KB/s + ~12 % bridge overhead ≈ **14 KB/s** | 92.16 KB/s (921600 8N1) | **~15 %** |
-| U11 → U9 UART @ 200 Hz ODR stretch | ≈ 28 KB/s | 92.16 KB/s | ~30 % (fallback: 2 Mbaud = 200 KB/s if the trace supports it) |
-| Node → hub BLE (per hub) | 6 × 100 Hz ≈ 12 KB/s air data (+BLE overhead) | ≈ 733 kbps measured @ 1M PHY; ≈ 1.3 Mbps @ 2M PHY (ST AN5289-class figures from the prior research brief) | comfortable |
-| U9 → app BLE | 12 ICM nodes (24 KB/s) + BNO @ 100 Hz (5.6 KB/s) ≈ **30 KB/s ≈ 240 kbps** raw, ≈ 300–350 kbps with envelopes | same as above | fits even at 1M PHY |
-| Note on envelopes | If the live path emits one 14 B envelope per sample, per-node overhead is significant; today's validated live cadence is 25 Hz (40 ms) and `exo_hub_central_client.h` comments reference a "40 ms sample cadence". Check how samples are batched per envelope at the injection point (⚠️ U8) before assuming 100 Hz envelope-per-sample costs. | | |
+| U11 → U9 UART | lower 6 nodes @ 25 Hz × 20 B = 3 KB/s + ~12 % bridge overhead ≈ **3.4 KB/s** | 92.16 KB/s (921600 8N1) | **~4 %** |
+| U11 → U9 UART @ 50 Hz stretch | ≈ 6.7 KB/s | 92.16 KB/s | ~7 % (2 Mbaud remains an optional measured fallback) |
+| Node → hub BLE (per hub) | 6 × 25 Hz ≈ 3 KB/s air data (+BLE overhead) | ≈ 733 kbps measured @ 1M PHY; ≈ 1.3 Mbps @ 2M PHY (ST AN5289-class figures from the prior research brief) | comfortable |
+| U9 → app BLE | 12 ICM nodes (6 KB/s) + BNO @ 25 Hz (1.4 KB/s) ≈ **7.4 KB/s** raw, with envelope overhead | same as above | fits at the required profile |
+| Note on envelopes | If the live path emits one 14 B envelope per sample, per-node overhead is significant; today's validated live cadence is 25 Hz (40 ms) and `exo_hub_central_client.h` comments reference a "40 ms sample cadence". Check how samples are batched per envelope at the injection point (⚠️ U8) before evaluating the separate 50 Hz stretch profile. | | |
 
 ### 4.3 Latency budget (design targets, not yet measured)
 
@@ -296,7 +296,7 @@ Commissioning stays "pair node → assign suit ID" as today, extended to 12: IDs
 | P1.1 | BER soak | U11 firmware skeleton: TX ring streaming 244 B PRBS32-filled blepipe frames at ≥ 40 KB/s; U9 counts CRC fails + resyncs. 30 min. Repeat ladder: 921600 → 1.5M → 2M | 0 CRC fails at 921600 over 30 min; record max stable baud |
 | P1.2 | RTT | U9 sends COMMAND-ping 100×/s for 10 s; U11 acks each; host measures | p99 RTT < 5 ms; zero lost pings |
 | P1.3 | Corruption recovery | inject byte flips at 1 Hz during P1.2 traffic | parser resyncs < 100 ms; no deadlock; counters explain every event |
-| P1.4 | Synthetic load | U11 generates 6 fake ICM streams (20 B @ 100 Hz) → UART → U9 → app BLE; browser app receives as node IDs 7–12 | 10 min zero drops; app-side sequence gaps = 0; U9 CPU/RAM unchanged beyond expected |
+| P1.4 | Synthetic load | U11 generates 6 fake ICM streams (20 B @ 25 Hz) → UART → U9 → app BLE; browser app receives as node IDs 7–12 | 10 min zero drops; app-side sequence gaps = 0; U9 CPU/RAM unchanged beyond expected |
 
 **Gate G1:** the UART bridge is proven at required throughput + recovery. This answers "can the two-STM approach work?" — before any node dependency.
 
@@ -304,7 +304,7 @@ Commissioning stays "pair node → assign suit ID" as today, extended to 12: IDs
 
 | # | Test | Procedure | Pass criteria |
 |---|---|---|---|
-| P2.1 | 6-link streaming | flash trimmed U11 build; connect 6 nodes (bench, suit not required); stream → UART → U9 → app | 6 × 100 Hz sustained 10 min; per-node drops = 0 (check `leaf_live_diag`) |
+| P2.1 | 6-link streaming | flash trimmed U11 build; connect 6 nodes (bench, suit not required); stream → UART → U9 → app | 6 × 25 Hz sustained 10 min; per-node drops = 0 (check `leaf_live_diag`) |
 | P2.2 | Dual-radio contention soak | U11 with 6 links + U9 idle-radio (app connected but quiet), 1 h; then repeat with U9 also streaming upper 6 if nodes available | retransmit ratio (`leaf_link_retries`) < 5 %; zero conn drops on both radios; document AFH behavior |
 | P2.3 | Control plane | U9 → bridge → U11 → BLE → node: ODR set, targeted reconnect, LED | round trip < 50 ms p99; node acks relayed intact |
 
@@ -314,7 +314,7 @@ Commissioning stays "pair node → assign suit ID" as today, extended to 12: IDs
 
 | # | Test | Procedure | Pass criteria |
 |---|---|---|---|
-| P3.1 | Full-suit live | 12 nodes streaming @ 100 Hz + BNO + chest ICM → app | 30 min: end-to-end drop rate < 0.1 %; per-node seq gaps logged and attributed (BLE vs UART vs app link) |
+| P3.1 | Full-suit live | 12 nodes streaming @ 25 Hz with BNO + chest ICM → app | 30 min: end-to-end drop rate < 0.1 %; per-node seq gaps logged and attributed (BLE vs UART vs app link) |
 | P3.2 | Latency histogram | host tooling timestamps (node sample counter → browser arrival) | p95 < 150 ms; p99 < 250 ms |
 | P3.3 | Worst-case contention | P3.1 + one SD recording session running on U9 simultaneously | no watchdog resets; drops within P3.1 thresholds |
 | P3.4 | Calibration dry run | run the 3-phase whole-suit calibration (N-pose static → dynamic functional set → validation) from a bench rig with all 13 sensors mounted on a fixture | calibration converges; cross-hub timestamp skew does not corrupt pose estimates (decides whether the sync-pulse bodge of §6.4 is needed) |
@@ -323,9 +323,14 @@ Commissioning stays "pair node → assign suit ID" as today, extended to 12: IDs
 
 ### Phase 4 — Soak & PCB order go/no-go
 
-- 24 h scripted soak: 12 nodes live @ 100 Hz, scripted 10 min recording sessions every 2 h, app connected throughout.
+- 24 h scripted soak: 12 nodes live at the required 25 Hz BNO+ICM profile, scripted 10 min recording sessions every 2 h, app connected throughout.
 - **Pass → order the next PCB batch.** Abort/rework criteria: any watchdog reset, drop-rate drift, RAM leak (SYSRAM watermark trend), UART resync-count growth.
-- Fallback ladder if a gate is marginal (each pre-analyzed, apply in order): ① lower-body live ODR 100→50 Hz (halves UART + lower-hub airtime) → ② UART 2 Mbaud (if P1.1 ladder allowed) → ③ conn-interval ladder retune via `link_tune_state` → ④ 2M PHY on app link → ⑤ sample batching changes at the injection point.
+### Stretch 50 Hz experiment
+
+Begin only after every required 25 Hz gate passes. Recalculate BLE airtime,
+phone notification capacity, UART load, queue sizes, and timestamp-age
+targets as a separate reviewed experiment. Do not silently change the
+production profile or its 40–80 ms live-interval clamp.
 
 ---
 
