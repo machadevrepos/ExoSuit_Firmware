@@ -40,7 +40,7 @@ class LinkTuneState {
     Parked,
   };
 
-  static constexpr uint8_t kLinkCount = 4U;
+  static constexpr uint8_t kLinkCount = 6U;
   static constexpr uint16_t kInvalidHandle = 0xFFFFU;
   static constexpr uint16_t kRequestedDleOctets = 251U;
   static constexpr uint16_t kRequestedDleTimeUs = 0x0848U;
