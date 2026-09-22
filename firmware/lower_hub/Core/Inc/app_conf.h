@@ -115,7 +115,7 @@
 /**
  * Device name configuration for Generic Access Service
  */
-#define CFG_GAP_DEVICE_NAME             "TEMPLATE"
+#define CFG_GAP_DEVICE_NAME             "HUB0002"
 #define CFG_GAP_DEVICE_NAME_LENGTH      (8)
 
 /**
@@ -201,7 +201,7 @@
  * Maximum number of simultaneous connections that the device will support.
  * Valid values are from 1 to 8
  */
-#define CFG_BLE_NUM_LINK            2
+#define CFG_BLE_NUM_LINK            6
 
 /**
  * Maximum number of Services that can be stored in the GATT database.
