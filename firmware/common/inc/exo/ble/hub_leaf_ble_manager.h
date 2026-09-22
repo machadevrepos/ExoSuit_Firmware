@@ -8,8 +8,10 @@
 
 namespace exo::ble_hub {
 
-class HubLeafBleManager {
+template<uint8_t MaxLeaves>
+class HubLeafBleManagerCore {
 public:
+  static_assert(MaxLeaves > 0U, "HubLeafBleManagerCore requires at least one leaf");
   struct LiveSample {
     uint8_t node_id = 0U;
     uint8_t sensor_id = 0U;
@@ -393,7 +395,7 @@ public:
   bool paused() const { return paused_; }
 
 private:
-  static constexpr uint8_t kMaxLeaves = 4U;
+  static constexpr uint8_t kMaxLeaves = MaxLeaves;
   static constexpr uint8_t kSensorsPerLeaf = 2U;
   static constexpr uint8_t kLiveSlotCount = kMaxLeaves * kSensorsPerLeaf;
   static constexpr uint8_t kLiveDepthPerSlot = 8U;
@@ -540,6 +542,10 @@ private:
   bool paused_ = false;
   uint32_t discovery_generation_ = 0U;
 };
+
+/* Preserve the existing four-node API while allowing the same state machine to
+ * be instantiated for a six-link hub. */
+using HubLeafBleManager = HubLeafBleManagerCore<4U>;
 
 } // namespace exo::ble_hub
 

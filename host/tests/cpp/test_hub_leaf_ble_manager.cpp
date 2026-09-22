@@ -95,6 +95,19 @@ int main()
     }
     assert(!manager.pop_next_record_done(selected));
 
+    using SixLinkManager = exo::ble_hub::HubLeafBleManagerCore<6U>;
+    SixLinkManager six_link_manager;
+    for (uint8_t node = 1U; node <= 6U; ++node) {
+        payload = static_cast<uint8_t>(0x80U + node);
+        assert(six_link_manager.push_leaf_sample(node, 1U, &payload, 1U,
+                                                 static_cast<uint32_t>(node)));
+    }
+    payload = 0xFFU;
+    assert(!six_link_manager.push_leaf_sample(7U, 1U, &payload, 1U, 7U));
+    assert(six_link_manager.pending_live_sample_count() == 6U);
+    assert(six_link_manager.live_rx_for_node(6U) == 1U);
+    assert(six_link_manager.live_rx_for_node(7U) == 0U);
+
     std::cout << "hub leaf manager tests passed\n";
     return 0;
 }
