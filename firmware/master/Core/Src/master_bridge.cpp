@@ -10,6 +10,7 @@
 #include <exo/ble/exo_hub_central_client.h>
 #include <exo/ble/exo_hub_leaf_bridge.h>
 #include <exo/bridge/frame_codec.h>
+#include <exo/bridge/link_health.h>
 #include <exo/bridge/queues.h>
 #include <exo/bridge/sequence_tracker.h>
 #include <exo/bridge/stream_decoder.h>
@@ -44,6 +45,10 @@ Decoder g_decoder;
 LiveQueue g_live_queue;
 ReliableQueue g_reliable_queue;
 exo::bridge::SequenceTracker g_rx_sequences;
+exo::bridge::LinkHealth g_link_health;
+uint32_t g_prev_bad_frames = 0U;
+uint32_t g_prev_reliable_rejected = 0U;
+uint32_t g_prev_gap_count = 0U;
 
 uint32_t next_boot_epoch()
 {
@@ -236,6 +241,7 @@ void service_rx()
         if (!g_decoder.pop(frame, packet, sizeof(packet))) continue;
         const auto result = g_rx_sequences.observe(frame.boot_epoch,
                                                    frame.sequence);
+        g_link_health.on_frame(result, HAL_GetTick());
         if (result == exo::bridge::SequenceResult::Duplicate ||
             result == exo::bridge::SequenceResult::Reordered) continue;
         dispatch(frame, packet);
@@ -281,15 +287,47 @@ extern "C" void exo_master_bridge_process(void)
     if (now - g_last_status_ms >= kStatusPeriodMs) {
         g_last_status_ms = now;
         const Decoder::Counters &counters = g_decoder.counters();
-        exo_ble_debug_printf("[BRIDGE][U9] epoch=%lu rx=%lu bad=%lu qlive=%u qrel=%u ovw=%lu relrej=%lu\r\n",
+        const uint32_t bad = counters.malformed + counters.oversized;
+        const uint32_t reliable_rejected = g_reliable_queue.rejected_count();
+        const uint32_t gaps = g_rx_sequences.gap_count();
+        /* Congested if new malformed/oversized frames, reliable rejects, or
+         * sequence gaps (lost UART frames) showed up this period, or the
+         * reliable lane is sitting at its bound - any of these mean the
+         * link cannot keep up right now. */
+        const bool congested = (bad != g_prev_bad_frames) ||
+            (reliable_rejected != g_prev_reliable_rejected) ||
+            (gaps != g_prev_gap_count) ||
+            (g_reliable_queue.count() >= kReliableDepth);
+        g_prev_bad_frames = bad;
+        g_prev_reliable_rejected = reliable_rejected;
+        g_prev_gap_count = gaps;
+        g_link_health.tick(now, congested);
+        exo_ble_debug_printf("[BRIDGE][U9] epoch=%lu rx=%lu bad=%lu qlive=%u qrel=%u ovw=%lu relrej=%lu state=%u\r\n",
                              static_cast<unsigned long>(g_boot_epoch),
                              static_cast<unsigned long>(counters.frames),
-                             static_cast<unsigned long>(counters.malformed + counters.oversized),
+                             static_cast<unsigned long>(bad),
                              static_cast<unsigned>(g_live_queue.pending_count()),
                              static_cast<unsigned>(g_reliable_queue.count()),
                              static_cast<unsigned long>(g_live_queue.overwrite_count()),
-                             static_cast<unsigned long>(g_reliable_queue.rejected_count()));
+                             static_cast<unsigned long>(reliable_rejected),
+                             static_cast<unsigned>(g_link_health.state()));
     }
+}
+
+extern "C" void exo_master_bridge_get_diag(exo_master_bridge_diag_t *out)
+{
+    if (out == nullptr) return;
+    const uint32_t now = HAL_GetTick();
+    const Decoder::Counters &counters = g_decoder.counters();
+    out->link_state = static_cast<uint8_t>(g_link_health.state());
+    out->link_age_ms = g_link_health.age_ms(now);
+    out->restart_count = g_link_health.restart_count();
+    out->frame_count = static_cast<uint32_t>(counters.frames);
+    out->bad_frame_count = static_cast<uint32_t>(counters.malformed + counters.oversized);
+    out->queue_live_count = static_cast<uint32_t>(g_live_queue.pending_count());
+    out->queue_reliable_count = static_cast<uint32_t>(g_reliable_queue.count());
+    out->overwrite_count = g_live_queue.overwrite_count();
+    out->reject_count = g_reliable_queue.rejected_count();
 }
 
 extern "C" uint8_t exo_master_bridge_send_blepipe(uint8_t msg_type,

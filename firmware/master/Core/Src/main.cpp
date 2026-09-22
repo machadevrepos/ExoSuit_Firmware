@@ -2438,6 +2438,57 @@ namespace {
 		}
 	}
 
+	/* U11 bridge health, ~1 line per 5 s, independent of the live-stream gate
+	 * so U11's state is visible even when nothing is streaming.
+	 *   u11    - LinkState (0 Absent 1 Booting 2 Healthy 3 Congested 4 Restarted)
+	 *   age    - ms since the last frame decoded from U11 (0xFFFFFFFF = never)
+	 *   rst    - restart count (peer boot-epoch changes seen since our own boot)
+	 *   rx/bad - bridge frames decoded / malformed+oversized
+	 *   qlive/qrel   - pending live / reliable queue depth
+	 *   ovw/relrej   - live queue overwrites / reliable queue rejects */
+	static void master_blepipe_send_bridge_diag()
+			{
+		static uint32_t s_last_ms = 0U;
+		static uint32_t s_diag_forced_ms = 0U;
+		const uint32_t now_ms = HAL_GetTick();
+		if (s_last_ms != 0U && (now_ms - s_last_ms) < 5000U) {
+			return;
+		}
+		s_last_ms = now_ms == 0U ? 1U : now_ms;
+
+		/* Same shared-TX-pool courtesy as master_blepipe_send_live_diag: skip
+		 * while live samples are still queued for the forwarder, but never
+		 * let more than ~10 s pass without a line. */
+		const bool diag_force = (s_diag_forced_ms == 0U) ||
+				(now_ms - s_diag_forced_ms) >= 10000U;
+		if (leaf_ble_manager.pending_live_sample_count() != 0U && !diag_force) {
+			return;
+		}
+		if (diag_force) {
+			s_diag_forced_ms = now_ms == 0U ? 1U : now_ms;
+		}
+
+		exo_master_bridge_diag_t diag { };
+		exo_master_bridge_get_diag(&diag);
+		char line[160];
+		const int n = snprintf(line, sizeof(line),
+				"BRIDGE u11=%u age=%lu rst=%lu rx=%lu bad=%lu qlive=%lu qrel=%lu ovw=%lu relrej=%lu",
+				static_cast<unsigned>(diag.link_state),
+				static_cast<unsigned long>(diag.link_age_ms),
+				static_cast<unsigned long>(diag.restart_count),
+				static_cast<unsigned long>(diag.frame_count),
+				static_cast<unsigned long>(diag.bad_frame_count),
+				static_cast<unsigned long>(diag.queue_live_count),
+				static_cast<unsigned long>(diag.queue_reliable_count),
+				static_cast<unsigned long>(diag.overwrite_count),
+				static_cast<unsigned long>(diag.reject_count));
+		if (n > 0) {
+			(void) master_blepipe_send(CUSTOM_STM_PIPESTATTX, BLEPIPE_MSG_LOG,
+					BLEPIPE_ID_BROADCAST, reinterpret_cast<const uint8_t*>(line),
+					static_cast<uint16_t>(n < static_cast<int>(sizeof(line)) ? n : static_cast<int>(sizeof(line) - 1)));
+		}
+	}
+
 	static bool master_handle_blepipe_command(const blepipe_hdr_t &hdr,
 			const uint8_t *payload,
 			uint16_t length)
@@ -3621,6 +3672,7 @@ int main(void)
 		record_stop_sync_process();
 		drain_leaf_stream_passthrough();
 		master_blepipe_send_live_diag();
+		master_blepipe_send_bridge_diag();
 		master_training_csv_coordinator.service(g_local_session_recorder, HAL_GetTick());
 		master_training_csv_release_completed_verify_ok();
 		/* Transfer progress telemetry: proves whether chunks actually move
