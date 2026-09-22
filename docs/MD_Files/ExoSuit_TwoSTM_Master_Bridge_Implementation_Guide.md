@@ -74,7 +74,19 @@
 
 ### 2.5 Memory (datasheet)
 
-STM32WB55CG: 1 MB flash, 256 KB RAM = 192 KB SYSRAM + 64 KB SRAM2 (BLE stack uses SRAM2 for link buffers). Going 6 → 8 links costs a few KB per link — must be verified from the linker map (⚠️ U5, §7 Phase 0).
+The physical STM32WB55 is the 1 MB G-grade device, but acceptance uses the
+repository's conservative CPU1 linker budget: **768 KiB application flash**,
+approximately **192 KiB CPU1 RAM**, and the existing **10 KiB shared RAM**
+reservation at `0x20030000`. CPU2 owns its BLE memory, so the link map and BLE
+pool configuration must both be checked; datasheet capacity alone is not an
+acceptance criterion.
+
+The current Master BLE pool is configured for six links, MTU 247, DLE enabled,
+68 GATT attributes, 8 GATT services, a 1344-byte attribute-value array, and
+`CFG_BLE_MBLOCK_COUNT` derived from the 247-byte prepare-write size plus the
+documented 16-block throughput reserve. Increasing U9 to eight links costs
+additional CPU2 pool memory and must be accepted only after the linker/map
+check in U5.
 
 ---
 
@@ -256,7 +268,7 @@ v0 scope **excludes** session-recording transfer across the bridge (U11 has no s
 
 ### 6.2 U9 — master firmware changes
 
-1. **`CFG_BLE_NUM_LINK` 6 → 8** in `Master.ioc` (7 needed: 6 upper + 1 app; 8 = margin). Rebuild, then verify SYSRAM/SRAM2 headroom in the `.map` (⚠️ U5). If RAM-tight: reduce unused GATT services on the peripheral side or trim pool sizes before accepting fewer links.
+1. **`CFG_BLE_NUM_LINK` 6 → 8** in `Master.ioc` (7 needed: 6 upper + 1 app; 8 = margin). Rebuild, then verify the 768 KiB flash / approximately 192 KiB CPU1 RAM linker budget, the 10 KiB shared-RAM reservation, and CPU2 BLE pool headroom in the `.map` (⚠️ U5). If RAM-tight: reduce unused GATT services on the peripheral side or trim pool sizes before accepting fewer links.
 2. **New module `bridge_host.h/.cpp` on U9:**
    - UART RX parser (same `bridge_uart_transport` code, opposite role) → decoded frames.
    - **Injection point:** feed `LEAF_SAMPLE` payloads into the same live-stream path that upper-node samples take today, tagged with `src_id` 0x0107–0x010C, so the app sees lower-body nodes as ordinary streams. Re-stamp arrival per the existing forwarded-data pattern. (⚠️ U8: read the exact live-path function in `main.cpp` first; keep the app envelope format untouched.)
