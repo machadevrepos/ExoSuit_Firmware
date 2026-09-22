@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include <exo/types/topology.h>
+
 namespace exo {
 
 enum class RecordCommand : uint8_t {
@@ -18,7 +20,8 @@ enum class RecordCommand : uint8_t {
     AbortPreparedRecord = 0x0D,
     StopRecord = 0x0E,
     StartSession = 0x0F,
-    RetrySource = 0x10
+    RetrySource = 0x10,
+    StartSessionV2 = 0x11
 };
 
 static constexpr uint8_t kRecordReliableProtoVersion = 6U;
@@ -118,6 +121,17 @@ struct StartSessionMessage {
     uint64_t start_timestamp_us;
     uint32_t safety_duration_ms;
     uint8_t selected_node_mask;
+    uint8_t stream_interval_ms;
+};
+
+/* Versioned session command. Legacy StartSessionMessage remains unchanged. */
+struct StartSessionV2Message {
+    RecordCommand command;
+    uint8_t protocol_version;
+    uint32_t session_id;
+    uint64_t start_timestamp_us;
+    uint32_t safety_duration_ms;
+    SourceMask selected_source_mask;
     uint8_t stream_interval_ms;
 };
 
