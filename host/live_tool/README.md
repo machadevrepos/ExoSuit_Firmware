@@ -2,7 +2,7 @@
 
 Browser application for live bicep-curl classification over Web Bluetooth.
 Implements the design in
-`docs/superpowers/specs/2026-09-01-live-bicep-curl-inference-design.md`.
+`docs/MD_Files/2026-09-01-live-bicep-curl-inference-design.md`.
 
 **The model is V1: experimental and personalized (six sessions, one person).
 It is not a general exercise-assessment or safety system, and the notebook's

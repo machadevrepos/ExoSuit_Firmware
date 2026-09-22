@@ -3,8 +3,8 @@
 Wearable exosuit prototype: one STM32WB55 **Master** hub + up to 4 sensor **Nodes**
 (BLE hub-leaf mesh), IMU session recording (Master SD / Node W25Q256 flash), live
 streaming to host tools, haptic actuation, and browser-based desktop tooling.
-Client-facing summary of end requirements: `docs/architecture/project-conversation.pdf`
-and `docs/hardware/milestones.pdf`.
+Client-facing summary of end requirements: `docs/project-conversation.pdf`
+and `docs/milestones.pdf`.
 
 ## Project truth
 
@@ -30,7 +30,7 @@ never to an exercise; bicep curl is only the first validation target.
 - `host/live_tool/js/motion-engine.js` — deterministic kinematics, independent of
   the model path by design. `host/live_tool/js/rep-analyzer.js` — per-rep verdicts
   against a coach target. Contract, scope limits, measured thresholds and field
-  results: `docs/architecture/motion-engine-contract.md`.
+  results: `docs/MD_Files/motion-engine-contract.md`.
 - Serve the live tool with `python host/live_tool/serve.py` (caching disabled);
   a red STALE BUILD banner means the browser is running cached modules.
 - Explicitly out of scope now: model retraining, AI-selected haptics, a polished
@@ -47,7 +47,7 @@ never to an exercise; bicep curl is only the first validation target.
 - `host/tests/` — `python/` (pytest), `cpp/` (CMake/ctest); `firmware/{master,node}/tests` — C++ module tests (source-invariant PS1 scripts were removed as stale)
 - `dataset/` — training sessions, **local-only (gitignored) until committed**; workflow per `dataset/README.md` via `scripts/qa_session.py`, `scripts/build_dataset_config.py`
 - `scripts/` — format/lint/setup + `analyze_session.py`, `monitor_ble.py`, `convert_bin_to_csv.sh` (merged from the former `host/scripts/`)
-- `docs/architecture/dataset-acquisition-branch-context.md` — **authoritative current-state context**; `docs/architecture/motion-engine-contract.md` — **current focus**, Coach Assist motion data contract + scope limits; `docs/specs/2026-09-07-bicep-curl-model-v2-design.md` — model V2 + Phase 0 plan (**deprioritized**, see below)
+- `docs/MD_Files/dataset-acquisition-branch-context.md` — **authoritative current-state context**; `docs/MD_Files/motion-engine-contract.md` — **current focus**, Coach Assist motion data contract + scope limits; `docs/MD_Files/2026-09-07-bicep-curl-model-v2-design.md` — model V2 + Phase 0 plan (**deprioritized**, see below)
 
 ## Verification (this PC)
 

@@ -71,7 +71,7 @@ Tests: `host/tests/python/test_motion_engine.py` (32 tests, all passing),
 `host/tests/scripts/replay_arm_avatar.mjs` (session-log replay audit)
 Source requirement: *Coach Assist Requirements, Milestone Alignment & Movement
 Tracking Plan* — sections 6, 7 (step 3/5) and 8. Three-pose design:
-`docs/superpowers/specs/2026-09-10-three-pose-anatomical-arm-calibration-design.md`.
+`docs/MD_Files/2026-09-10-three-pose-anatomical-arm-calibration-design.md`.
 
 ## Purpose
 

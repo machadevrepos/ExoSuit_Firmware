@@ -76,7 +76,7 @@ The design builds on the repository's existing topology and protocols:
 - The existing browser decoder understands these compact BNO and ICM samples.
 - Master can broadcast stream-control commands and forward targeted actuator commands.
 
-Note: `docs/architecture/four-node-live-preview-training-csv-design.md`
+Note: `docs/MD_Files/four-node-live-preview-training-csv-design.md`
 describes a per-source "preview bundle" carrying both sensors behind
 present-flags. The firmware does not implement that. The per-sample B1 envelope
 above is authoritative for this design, and the bundle description in that

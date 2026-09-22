@@ -98,7 +98,7 @@
 
 **Files:**
 - Modify: `host/desktop_tool/Exoskeleton.html`
-- Modify: `docs/guides/four-node-live-csv-validation.md`
+- Modify: `docs/MD_Files/four-node-live-csv-validation.md`
 - Test: `host/tests/python/test_exoskeleton_contract.py`
 
 **Interfaces:**

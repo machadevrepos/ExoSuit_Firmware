@@ -1,7 +1,7 @@
 """Shared offline and live preprocessing for the Vantare bicep-curl model.
 
 Authoritative Python source of truth for the pipeline described in
-docs/superpowers/specs/2026-09-01-live-bicep-curl-inference-design.md.
+docs/MD_Files/2026-09-01-live-bicep-curl-inference-design.md.
 The notebook exports a copy of this file, and the browser port in
 host/live_tool/js/ml-preprocessing.js mirrors it channel for channel.
 

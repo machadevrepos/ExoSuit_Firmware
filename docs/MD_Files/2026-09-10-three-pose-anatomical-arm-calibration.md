@@ -8,7 +8,7 @@
 
 **Tech Stack:** Browser ES modules, JavaScript quaternion/vector math, CSS 3D transforms, Node.js test runners, Python `unittest`/pytest fixture harness.
 
-**Spec:** `docs/superpowers/specs/2026-09-10-three-pose-anatomical-arm-calibration-design.md`
+**Spec:** `docs/MD_Files/2026-09-10-three-pose-anatomical-arm-calibration-design.md`
 
 ## Global Constraints
 
@@ -267,7 +267,7 @@ git commit -m "feat(live-tool): guide anatomical arm calibration"
 ### Task 5: Replay, Browser, and Physical Handoff Verification
 
 **Files:**
-- Modify: `docs/architecture/motion-engine-contract.md`
+- Modify: `docs/MD_Files/motion-engine-contract.md`
 - Create: `host/tests/scripts/replay_arm_avatar.mjs`
 - Modify: `host/tests/python/test_live_tool_invariants.py`
 
@@ -328,7 +328,7 @@ Serve with `py -3 host/live_tool/serve.py`, hard-refresh `http://localhost:8080/
 - [ ] **Step 7: Commit replay and documentation**
 
 ```powershell
-git add host/tests/scripts/replay_arm_avatar.mjs docs/architecture/motion-engine-contract.md
+git add host/tests/scripts/replay_arm_avatar.mjs docs/MD_Files/motion-engine-contract.md
 git commit -m "test(motion): add anatomical avatar replay audit"
 ```
 

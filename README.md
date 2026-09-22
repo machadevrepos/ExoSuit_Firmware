@@ -27,7 +27,7 @@ sessions to SD/flash and streaming live previews to a browser desktop tool.
 | `host/tests/`            | Python invariant tests + C++ module tests (CMake/ctest)         |
 | `host/notebooks/`        | Model training notebooks + exported artifacts                   |
 | `scripts/`               | Format / lint / setup / dataset-QA / session tools              |
-| `hardware/{master,node}/{v1.0,v1.1}/` | Schematics, PCB, BOM, gerbers, STEP                |
+| `docs/PCB/{master,node}/v1.1/` | Schematics, PCB, BOM, gerbers, STEP                |
 | `docs/`                  | Architecture docs, guides, plans, specs                         |
 
 `dataset/` (training sessions) is local-only — it is gitignored until a dataset

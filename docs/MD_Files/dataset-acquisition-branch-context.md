@@ -6,7 +6,7 @@
 >
 > **Focus: Coach Assist Motion Engine (Milestone 4)** — deterministic host-side kinematics
 > in `host/live_tool/js/motion-engine.js`; contract + scope limits in
-> `docs/architecture/motion-engine-contract.md`. Calibration maps sensors to **body
+> `docs/MD_Files/motion-engine-contract.md`. Calibration maps sensors to **body
 > segments** (N4 = upper arm, N2 = forearm, N3 = elbow validation + haptic site; master
 > IMU = torso reference only), never to exercises; bicep curl is only the first
 > validation target. First live validation **PASSED 2026-09-10**: calibration first try,
@@ -23,13 +23,13 @@
 > - AI model: **deprioritized by design.** The constant-output issue (header below) and
 >   the session==class / mounting-leak diagnosis (§4.2) stay open but are off the
 >   critical path. Model V2 + Phase 0 plan parked at
->   `docs/superpowers/specs/2026-09-07-bicep-curl-model-v2-design.md`.
+>   `docs/MD_Files/2026-09-07-bicep-curl-model-v2-design.md`.
 > - Throughput: live wall ~9.8 KB/s shared; record upload measured ~7.2 KB/s per node
 >   with root cause diagnosed (§3.6). **Speedup in code 2026-09-13 on
 >   `feature/BLE_speed_Optimization`** — Node 0x08 completion wake + pump TX-pool
 >   budget top-up + bulk CE hint at every ladder level + owned bulk interval 20 ms;
 >   design + verification gates in
->   `docs/superpowers/specs/2026-09-13-ble-node-master-throughput-design.md`.
+>   `docs/MD_Files/2026-09-13-ble-node-master-throughput-design.md`.
 > - P1 (Node notification-completion 0x08): **applied 2026-09-13 on
 >   `feature/BLE_speed_Optimization`** (mask 0x0F on Node PipeDataTx, completion
 >   counter filtered to the PipeDataTx value handle, length type stays VARIABLE —
@@ -43,7 +43,7 @@
 >
 > **How to resume in a new chat:** AGENTS.md loads automatically and points here. Prior
 > sessions do not need reopening — their durable results live in this doc,
-> `docs/architecture/firmware-issues-and-fixes.md`, `docs/architecture/motion-engine-contract.md`,
+> `docs/MD_Files/firmware-issues-and-fixes.md`, `docs/MD_Files/motion-engine-contract.md`,
 > or agent memory. The old Claude-import deep-dive on `exo_hub_central_client.cpp` is
 > fully folded into §3/§5.
 
@@ -233,7 +233,7 @@ All four prior findings **CONFIRMED** at their cited lines. Four additional issu
 > verification): Node PipeDataTx mask 0x07→0x0F, length type kept VARIABLE, completion
 > counter filtered to the PipeDataTx value handle, plus the pump budget top-up and
 > bulk interval/CE changes — design + verification gates in
-> `docs/superpowers/specs/2026-09-13-ble-node-master-throughput-design.md`. The
+> `docs/MD_Files/2026-09-13-ble-node-master-throughput-design.md`. The
 > original analysis below is retained for context.
 - `Node/Core/Src/ble/custom_stm.cpp:529,555,581,607,633` create every characteristic with event mask 0x07; Master sets 0x0F on PipeDataTx (`Master/Core/Src/ble/custom_stm.cpp:571`). The Node-side plumbing is otherwise complete and therefore dead: VS-event case `custom_stm.cpp:400-411` → `Custom_APP_NotificationComplete` `custom_app.cpp:325-338` → counters read at `Node/Core/Src/main.cpp:470-474` (live gate) and `:802-807` (upload pump).
 - **Consequence split (refined this sweep):**

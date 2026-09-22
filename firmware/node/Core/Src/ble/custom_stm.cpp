@@ -531,7 +531,7 @@ void SVCCTL_InitCustomSvc(void)
    */
   COPY_PIPEDATATX_UUID(uuid.Char_UUID_128);
   /* Owned deviation of the WPAN template (documented in
-   * docs/architecture/dataset-acquisition-branch-context.md §5 P1): PipeDataTx
+   * docs/MD_Files/dataset-acquisition-branch-context.md §5 P1): PipeDataTx
    * carries the GATT_NOTIFY_NOTIFICATION_COMPLETION bit (0x08) like the
    * Master's PipeDataTx, so the CPU2 emits a completion event after each
    * transmitted notification and the upload pump / live gate wake on the
