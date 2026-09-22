@@ -10,6 +10,8 @@ namespace exo::node_runtime_config {
 
 static constexpr uint8_t kNodeIdMin = kFirstNodeId;
 static constexpr uint8_t kNodeIdMax = kLastNodeId;
+static constexpr uint8_t kPersistentNodeIdMin = kUncommissionedNodeId;
+static constexpr uint8_t kPersistentNodeIdMax = kLastNodeId;
 static constexpr uint32_t kDefaultFlashTotalSize = 2U * 1024U * 1024U;
 static constexpr uint32_t kSettingsSectorSize = 4096U;
 static constexpr uint32_t kSettingsMagic = 0x4E535447UL; /* 'NSTG' */
@@ -108,6 +110,18 @@ inline bool is_valid_node_id(uint8_t node_id) {
     return (node_id >= kNodeIdMin) && (node_id <= kNodeIdMax);
 }
 
+inline bool is_commissioning_node_id(uint8_t node_id) {
+    return node_id == kUncommissionedNodeId;
+}
+
+inline bool is_valid_persistent_node_id(uint8_t node_id) {
+    return (node_id >= kPersistentNodeIdMin) && (node_id <= kPersistentNodeIdMax);
+}
+
+inline bool normal_traffic_allowed(uint8_t node_id) {
+    return is_valid_node_id(node_id);
+}
+
 /* Blank and IoError must stay distinguishable: an uncommissioned sector should be
  * provisioned, but a bus error must never be, or a transient SPI glitch would
  * overwrite a commissioned id with the build default. */
@@ -124,7 +138,8 @@ inline SettingsReadResult read_settings(NodePersistentSettings &out) {
     if (!read_hook()(settings_sector_base(), &out, static_cast<uint32_t>(sizeof(out)))) {
         return SettingsReadResult::IoError;
     }
-    if (out.magic != kSettingsMagic || out.version != kSettingsVersion || !is_valid_node_id(out.node_id)) {
+    if (out.magic != kSettingsMagic || out.version != kSettingsVersion ||
+            !is_valid_persistent_node_id(out.node_id)) {
         return SettingsReadResult::Blank;
     }
     const uint32_t calc = crc32_ieee(reinterpret_cast<const uint8_t *>(&out), static_cast<uint32_t>(sizeof(out) - sizeof(out.crc32)));
@@ -136,7 +151,7 @@ inline bool load_settings(NodePersistentSettings &out) {
 }
 
 inline bool store_node_id(uint8_t node_id) {
-    if (!is_valid_node_id(node_id) || !storage_ready()) {
+    if (!is_valid_persistent_node_id(node_id) || !storage_ready()) {
         return false;
     }
     NodePersistentSettings settings{};
@@ -208,7 +223,10 @@ inline bool provision_node_id(uint8_t default_id) {
             node_id_cache_valid() = true;
             return true;
         case SettingsReadResult::Blank:
-            return store_node_id(is_valid_node_id(default_id) ? default_id : kNodeIdMin);
+            /* A blank node remains explicitly uncommissioned. The build default
+             * is only a read-error fallback; it must never silently claim an id. */
+            (void)default_id;
+            return store_node_id(kUncommissionedNodeId);
         case SettingsReadResult::IoError:
         default:
             return false;
