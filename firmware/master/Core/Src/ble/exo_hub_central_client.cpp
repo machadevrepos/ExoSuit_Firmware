@@ -2,6 +2,7 @@
 #include <exo/ble/link_tune_state.h>
 #include <exo/protocol/ble_record_protocol.h>
 #include <exo/protocol/live_bundle_v2.h>
+#include <exo/types/topology.h>
 
 #include <string.h>
 
@@ -2160,6 +2161,12 @@ void hci_le_advertising_report_event(uint8_t Num_Reports,
 //            (unsigned)Advertising_Report->Event_Type,
 //            (unsigned)Advertising_Report->Length_Data,
 //            (int)(int8_t)Advertising_Report->RSSI);
+    return;
+  }
+  if (!exo::hub_owns_node(exo::HubId::Main, node_id))
+  {
+    EXO_LOG("[BLE][HUB][DISC] adv ignored unowned node=%u\r\n",
+            (unsigned)node_id);
     return;
   }
   exo_log_adv_report(Advertising_Report, node_id);

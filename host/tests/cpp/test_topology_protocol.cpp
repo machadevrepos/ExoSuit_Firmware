@@ -28,7 +28,10 @@ void test_node_ranges_and_ownership()
     EXPECT_TRUE(exo::hub_for_node(7U) == exo::HubId::Lower);
     EXPECT_TRUE(exo::hub_for_node(12U) == exo::HubId::Lower);
     EXPECT_TRUE(exo::hub_owns_node(exo::HubId::Main, 6U));
+    EXPECT_TRUE(!exo::hub_owns_node(exo::HubId::Main, 0U));
     EXPECT_TRUE(!exo::hub_owns_node(exo::HubId::Main, 7U));
+    EXPECT_TRUE(!exo::hub_owns_node(exo::HubId::Main, 12U));
+    EXPECT_TRUE(!exo::hub_owns_node(exo::HubId::Lower, 6U));
     EXPECT_TRUE(exo::hub_owns_node(exo::HubId::Lower, 12U));
     EXPECT_TRUE(!exo::hub_owns_node(exo::HubId::Lower, 13U));
 }
