@@ -143,6 +143,69 @@ typedef struct __attribute__((packed)) {
   uint8_t  stream_interval_ms;
 } blepipe_stream_control_v2_t;
 
+#define BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN       8U
+#define BLEPIPE_STREAM_CONTROL_V2_PAYLOAD_LEN 5U
+
+static inline blepipe_status_t blepipe_topology_v2_encode(
+    uint8_t *dst, size_t dst_len, const blepipe_topology_v2_t *message,
+    size_t *encoded_len)
+{
+  if (dst == NULL || message == NULL || encoded_len == NULL) return BLEPIPE_STATUS_BAD_ARG;
+  if (dst_len < BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN) return BLEPIPE_STATUS_TOO_SHORT;
+  dst[0] = message->protocol_version;
+  dst[1] = message->hub_id;
+  dst[2] = (uint8_t)(message->present_source_mask & 0xFFU);
+  dst[3] = (uint8_t)(message->present_source_mask >> 8);
+  dst[4] = (uint8_t)(message->owned_source_mask & 0xFFU);
+  dst[5] = (uint8_t)(message->owned_source_mask >> 8);
+  dst[6] = (uint8_t)(message->fault_source_mask & 0xFFU);
+  dst[7] = (uint8_t)(message->fault_source_mask >> 8);
+  *encoded_len = BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN;
+  return BLEPIPE_STATUS_OK;
+}
+
+static inline blepipe_status_t blepipe_topology_v2_decode(
+    const uint8_t *src, size_t src_len, blepipe_topology_v2_t *message)
+{
+  if (src == NULL || message == NULL) return BLEPIPE_STATUS_BAD_ARG;
+  if (src_len != BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN) return BLEPIPE_STATUS_BAD_LENGTH;
+  if (src[0] != BLEPIPE_TOPOLOGY_PROTO_VER) return BLEPIPE_STATUS_BAD_VERSION;
+  message->protocol_version = src[0];
+  message->hub_id = src[1];
+  message->present_source_mask = (uint16_t)src[2] | ((uint16_t)src[3] << 8);
+  message->owned_source_mask = (uint16_t)src[4] | ((uint16_t)src[5] << 8);
+  message->fault_source_mask = (uint16_t)src[6] | ((uint16_t)src[7] << 8);
+  return BLEPIPE_STATUS_OK;
+}
+
+static inline blepipe_status_t blepipe_stream_control_v2_encode(
+    uint8_t *dst, size_t dst_len, const blepipe_stream_control_v2_t *message,
+    size_t *encoded_len)
+{
+  if (dst == NULL || message == NULL || encoded_len == NULL) return BLEPIPE_STATUS_BAD_ARG;
+  if (dst_len < BLEPIPE_STREAM_CONTROL_V2_PAYLOAD_LEN) return BLEPIPE_STATUS_TOO_SHORT;
+  dst[0] = message->protocol_version;
+  dst[1] = message->command;
+  dst[2] = (uint8_t)(message->target_source_mask & 0xFFU);
+  dst[3] = (uint8_t)(message->target_source_mask >> 8);
+  dst[4] = message->stream_interval_ms;
+  *encoded_len = BLEPIPE_STREAM_CONTROL_V2_PAYLOAD_LEN;
+  return BLEPIPE_STATUS_OK;
+}
+
+static inline blepipe_status_t blepipe_stream_control_v2_decode(
+    const uint8_t *src, size_t src_len, blepipe_stream_control_v2_t *message)
+{
+  if (src == NULL || message == NULL) return BLEPIPE_STATUS_BAD_ARG;
+  if (src_len != BLEPIPE_STREAM_CONTROL_V2_PAYLOAD_LEN) return BLEPIPE_STATUS_BAD_LENGTH;
+  if (src[0] != BLEPIPE_STREAM_CONTROL_PROTO_VER) return BLEPIPE_STATUS_BAD_VERSION;
+  message->protocol_version = src[0];
+  message->command = src[1];
+  message->target_source_mask = (uint16_t)src[2] | ((uint16_t)src[3] << 8);
+  message->stream_interval_ms = src[4];
+  return BLEPIPE_STATUS_OK;
+}
+
 uint16_t blepipe_crc16_ccitt(const uint8_t *data, size_t len);
 blepipe_status_t blepipe_encode(uint8_t *dst, size_t dst_len, const blepipe_hdr_t *hdr,
                                 const uint8_t *payload, uint16_t payload_len,

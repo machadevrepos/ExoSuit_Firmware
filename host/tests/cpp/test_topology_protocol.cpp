@@ -83,6 +83,41 @@ void test_versioned_control_and_topology_payloads()
     };
     const uint8_t control_expected[] = { 0x02U, 0xA2U, 0x02U, 0x10U, 0x28U };
     EXPECT_TRUE(std::memcmp(&control, control_expected, sizeof(control_expected)) == 0);
+
+    uint8_t encoded_topology[BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN] = { 0U };
+    size_t encoded_len = 0U;
+    EXPECT_TRUE(blepipe_topology_v2_encode(encoded_topology, sizeof(encoded_topology),
+                                           &topology, &encoded_len) == BLEPIPE_STATUS_OK);
+    EXPECT_TRUE(encoded_len == BLEPIPE_TOPOLOGY_V2_PAYLOAD_LEN);
+    EXPECT_TRUE(std::memcmp(encoded_topology, topology_expected, sizeof(topology_expected)) == 0);
+
+    blepipe_topology_v2_t decoded_topology = {};
+    EXPECT_TRUE(blepipe_topology_v2_decode(encoded_topology, encoded_len,
+                                           &decoded_topology) == BLEPIPE_STATUS_OK);
+    EXPECT_TRUE(decoded_topology.protocol_version == topology.protocol_version);
+    EXPECT_TRUE(decoded_topology.hub_id == topology.hub_id);
+    EXPECT_TRUE(decoded_topology.present_source_mask == topology.present_source_mask);
+    EXPECT_TRUE(decoded_topology.owned_source_mask == topology.owned_source_mask);
+    EXPECT_TRUE(decoded_topology.fault_source_mask == topology.fault_source_mask);
+    EXPECT_TRUE(blepipe_topology_v2_decode(encoded_topology, encoded_len - 1U,
+                                           &decoded_topology) == BLEPIPE_STATUS_BAD_LENGTH);
+
+    uint8_t encoded_control[BLEPIPE_STREAM_CONTROL_V2_PAYLOAD_LEN] = { 0U };
+    encoded_len = 0U;
+    EXPECT_TRUE(blepipe_stream_control_v2_encode(encoded_control, sizeof(encoded_control),
+                                                 &control, &encoded_len) == BLEPIPE_STATUS_OK);
+    EXPECT_TRUE(encoded_len == BLEPIPE_STREAM_CONTROL_V2_PAYLOAD_LEN);
+    EXPECT_TRUE(std::memcmp(encoded_control, control_expected, sizeof(control_expected)) == 0);
+
+    blepipe_stream_control_v2_t decoded_control = {};
+    EXPECT_TRUE(blepipe_stream_control_v2_decode(encoded_control, encoded_len,
+                                                 &decoded_control) == BLEPIPE_STATUS_OK);
+    EXPECT_TRUE(decoded_control.protocol_version == control.protocol_version);
+    EXPECT_TRUE(decoded_control.command == control.command);
+    EXPECT_TRUE(decoded_control.target_source_mask == control.target_source_mask);
+    EXPECT_TRUE(decoded_control.stream_interval_ms == control.stream_interval_ms);
+    EXPECT_TRUE(blepipe_stream_control_v2_decode(encoded_control, encoded_len - 1U,
+                                                 &decoded_control) == BLEPIPE_STATUS_BAD_LENGTH);
 }
 
 }  // namespace
