@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <exo/protocol/blepipe_proto.h>
+#include <exo/utils/le.h>
 
 namespace exo {
 
@@ -53,22 +54,6 @@ inline bool live_bundle_v2_fields_valid(const LiveBundleV2Message<MaxSensorPaylo
                                  message.icm_payload_length) <= BLEPIPE_MAX_APP_PAYLOAD;
 }
 
-inline void live_bundle_v2_put_u32(uint8_t *dst, uint32_t value)
-{
-    dst[0] = static_cast<uint8_t>(value & 0xFFU);
-    dst[1] = static_cast<uint8_t>((value >> 8) & 0xFFU);
-    dst[2] = static_cast<uint8_t>((value >> 16) & 0xFFU);
-    dst[3] = static_cast<uint8_t>((value >> 24) & 0xFFU);
-}
-
-inline uint32_t live_bundle_v2_get_u32(const uint8_t *src)
-{
-    return static_cast<uint32_t>(src[0]) |
-           (static_cast<uint32_t>(src[1]) << 8) |
-           (static_cast<uint32_t>(src[2]) << 16) |
-           (static_cast<uint32_t>(src[3]) << 24);
-}
-
 template<uint8_t MaxSensorPayload>
 inline bool live_bundle_v2_encode(const LiveBundleV2Message<MaxSensorPayload> &message,
                                   uint8_t *dst, size_t dst_len, size_t *encoded_len)
@@ -86,9 +71,9 @@ inline bool live_bundle_v2_encode(const LiveBundleV2Message<MaxSensorPayload> &m
     dst[1] = message.flags;
     dst[2] = message.bno_payload_length;
     dst[3] = message.icm_payload_length;
-    live_bundle_v2_put_u32(dst + 4U, message.bundle_sequence);
-    live_bundle_v2_put_u32(dst + 8U, message.bno_acquired_ms);
-    live_bundle_v2_put_u32(dst + 12U, message.icm_acquired_ms);
+    put_le32(dst + 4U, message.bundle_sequence);
+    put_le32(dst + 8U, message.bno_acquired_ms);
+    put_le32(dst + 12U, message.icm_acquired_ms);
     size_t offset = kLiveBundleV2HeaderSize;
     if (message.bno_payload_length != 0U) {
         memcpy(dst + offset, message.bno_payload, message.bno_payload_length);
@@ -114,9 +99,9 @@ inline bool live_bundle_v2_decode(const uint8_t *src, size_t src_len,
     decoded.flags = src[1];
     decoded.bno_payload_length = src[2];
     decoded.icm_payload_length = src[3];
-    decoded.bundle_sequence = live_bundle_v2_get_u32(src + 4U);
-    decoded.bno_acquired_ms = live_bundle_v2_get_u32(src + 8U);
-    decoded.icm_acquired_ms = live_bundle_v2_get_u32(src + 12U);
+    decoded.bundle_sequence = get_le32(src + 4U);
+    decoded.bno_acquired_ms = get_le32(src + 8U);
+    decoded.icm_acquired_ms = get_le32(src + 12U);
     if (!live_bundle_v2_fields_valid(decoded) ||
             src_len != kLiveBundleV2WireSize(decoded.bno_payload_length,
                                               decoded.icm_payload_length)) {

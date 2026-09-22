@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <exo/types/topology.h>
+#include <exo/utils/crc32.h>
 
 namespace exo::node_runtime_config {
 
@@ -84,18 +85,6 @@ inline bool set_flash_capacity(uint32_t capacity) {
     return true;
 }
 
-inline uint32_t crc32_ieee(const uint8_t *data, uint32_t len) {
-    uint32_t crc = 0xFFFFFFFFUL;
-    for (uint32_t i = 0U; i < len; ++i) {
-        crc ^= static_cast<uint32_t>(data[i]);
-        for (uint8_t b = 0U; b < 8U; ++b) {
-            const uint32_t mask = static_cast<uint32_t>(-(static_cast<int32_t>(crc & 1U)));
-            crc = (crc >> 1U) ^ (0xEDB88320UL & mask);
-        }
-    }
-    return ~crc;
-}
-
 inline bool storage_ready() {
     return read_hook() != nullptr && write_hook() != nullptr && erase_hook() != nullptr;
 }
@@ -110,16 +99,8 @@ inline bool is_valid_node_id(uint8_t node_id) {
     return (node_id >= kNodeIdMin) && (node_id <= kNodeIdMax);
 }
 
-inline bool is_commissioning_node_id(uint8_t node_id) {
-    return node_id == kUncommissionedNodeId;
-}
-
 inline bool is_valid_persistent_node_id(uint8_t node_id) {
     return (node_id >= kPersistentNodeIdMin) && (node_id <= kPersistentNodeIdMax);
-}
-
-inline bool normal_traffic_allowed(uint8_t node_id) {
-    return is_valid_node_id(node_id);
 }
 
 /* Blank and IoError must stay distinguishable: an uncommissioned sector should be

@@ -31,14 +31,9 @@ int main()
     EXPECT_TRUE(exo::node_runtime_config::is_valid_node_id(12U));
     EXPECT_TRUE(!exo::node_runtime_config::is_valid_node_id(13U));
 
-    EXPECT_TRUE(exo::node_runtime_config::is_commissioning_node_id(0U));
-    EXPECT_TRUE(!exo::node_runtime_config::is_commissioning_node_id(1U));
     EXPECT_TRUE(exo::node_runtime_config::is_valid_persistent_node_id(0U));
     EXPECT_TRUE(exo::node_runtime_config::is_valid_persistent_node_id(12U));
     EXPECT_TRUE(!exo::node_runtime_config::is_valid_persistent_node_id(13U));
-    EXPECT_TRUE(!exo::node_runtime_config::normal_traffic_allowed(0U));
-    EXPECT_TRUE(exo::node_runtime_config::normal_traffic_allowed(1U));
-    EXPECT_TRUE(exo::node_runtime_config::normal_traffic_allowed(12U));
 
     EXPECT_TRUE(blepipe_node_message_allowed(0U, BLEPIPE_MSG_ACK) != 0U);
     EXPECT_TRUE(blepipe_node_message_allowed(0U, BLEPIPE_MSG_LEAF_SAMPLE) == 0U);

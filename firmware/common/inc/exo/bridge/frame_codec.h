@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <cstring>
 
+#include <exo/utils/crc32.h>
+#include <exo/utils/le.h>
+
 namespace exo::bridge {
 
 static constexpr uint8_t kFrameVersion = 1U;
@@ -46,46 +49,6 @@ struct Frame {
 inline bool valid_lane(Lane lane)
 {
     return lane == Lane::Live || lane == Lane::Reliable;
-}
-
-inline void put_le16(uint8_t *dst, uint16_t value)
-{
-    dst[0] = static_cast<uint8_t>(value & 0xFFU);
-    dst[1] = static_cast<uint8_t>(value >> 8U);
-}
-
-inline void put_le32(uint8_t *dst, uint32_t value)
-{
-    dst[0] = static_cast<uint8_t>(value & 0xFFU);
-    dst[1] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
-    dst[2] = static_cast<uint8_t>((value >> 16U) & 0xFFU);
-    dst[3] = static_cast<uint8_t>(value >> 24U);
-}
-
-inline uint16_t get_le16(const uint8_t *src)
-{
-    return static_cast<uint16_t>(src[0]) |
-           static_cast<uint16_t>(static_cast<uint16_t>(src[1]) << 8U);
-}
-
-inline uint32_t get_le32(const uint8_t *src)
-{
-    return static_cast<uint32_t>(src[0]) |
-           (static_cast<uint32_t>(src[1]) << 8U) |
-           (static_cast<uint32_t>(src[2]) << 16U) |
-           (static_cast<uint32_t>(src[3]) << 24U);
-}
-
-inline uint32_t crc32(const uint8_t *data, size_t length)
-{
-    uint32_t crc = 0xFFFFFFFFU;
-    for (size_t i = 0U; i < length; ++i) {
-        crc ^= data[i];
-        for (uint8_t bit = 0U; bit < 8U; ++bit) {
-            crc = (crc & 1U) != 0U ? (crc >> 1U) ^ 0xEDB88320U : crc >> 1U;
-        }
-    }
-    return crc ^ 0xFFFFFFFFU;
 }
 
 inline Status cobs_encode(const uint8_t *input, size_t input_length,
@@ -177,7 +140,7 @@ inline Status encode(const Frame &frame, uint8_t *output, size_t output_capacity
         std::memcpy(&raw[kHeaderLength], frame.payload, frame.payload_length);
     }
     const size_t body_length = kHeaderLength + frame.payload_length;
-    put_le32(&raw[body_length], crc32(raw, body_length));
+    put_le32(&raw[body_length], crc32_ieee(raw, body_length));
     return cobs_encode(raw, body_length + kCrcLength, output, output_capacity,
                        output_length);
 }
@@ -205,7 +168,7 @@ inline Status decode(const uint8_t *input, size_t input_length,
         return Status::BadLength;
     }
     const uint32_t received_crc = get_le32(&raw[raw_length - kCrcLength]);
-    if (crc32(raw, raw_length - kCrcLength) != received_crc) {
+    if (crc32_ieee(raw, raw_length - kCrcLength) != received_crc) {
         return Status::BadCrc;
     }
     if (payload_length > payload_capacity) return Status::TooLong;
