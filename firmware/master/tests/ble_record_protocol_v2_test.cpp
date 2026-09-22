@@ -9,6 +9,10 @@ static_assert(sizeof(exo::StartSessionV2Message) == 21U,
               "StartSessionV2 wire format must include a 16-bit source mask");
 static_assert(static_cast<uint8_t>(exo::RecordCommand::StartSessionV2) == 0x11U,
               "StartSessionV2 must use a collision-free command id");
+static_assert(static_cast<uint16_t>(exo::RecordSourceId::Node4) == 4U,
+              "Legacy RecordSourceId values must remain unchanged");
+static_assert(static_cast<uint16_t>(exo::RecordSourceId::Node12) == 12U,
+              "RecordSourceId must represent all twelve nodes");
 
 int main()
 {

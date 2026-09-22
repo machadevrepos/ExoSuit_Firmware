@@ -48,7 +48,15 @@ enum class RecordSourceId : uint16_t {
     Node1 = 1U,
     Node2 = 2U,
     Node3 = 3U,
-    Node4 = 4U
+    Node4 = 4U,
+    Node5 = 5U,
+    Node6 = 6U,
+    Node7 = 7U,
+    Node8 = 8U,
+    Node9 = 9U,
+    Node10 = 10U,
+    Node11 = 11U,
+    Node12 = 12U
 };
 
 enum class RecordReliableType : uint8_t {
