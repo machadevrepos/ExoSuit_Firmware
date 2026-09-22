@@ -166,7 +166,8 @@ uint8_t blepipe_msg_allowed_on_lane(blepipe_lane_t lane, uint8_t msg_type)
       return (uint8_t)((msg_type == BLEPIPE_MSG_COMMAND) ||
                        (msg_type == BLEPIPE_MSG_TIME_SYNC) ||
                        (msg_type == BLEPIPE_MSG_CONFIG_SET) ||
-                       (msg_type == BLEPIPE_MSG_STREAM_CONTROL));
+                       (msg_type == BLEPIPE_MSG_STREAM_CONTROL) ||
+                       (msg_type == BLEPIPE_MSG_STREAM_CONTROL_V2));
 
     case BLEPIPE_LANE_CONTROL_TX:
       return (uint8_t)((msg_type == BLEPIPE_MSG_COMMAND_RESP) ||
@@ -176,6 +177,7 @@ uint8_t blepipe_msg_allowed_on_lane(blepipe_lane_t lane, uint8_t msg_type)
     case BLEPIPE_LANE_STATUS_TX:
       return (uint8_t)((msg_type == BLEPIPE_MSG_STATUS) ||
                        (msg_type == BLEPIPE_MSG_TOPOLOGY) ||
+                       (msg_type == BLEPIPE_MSG_TOPOLOGY_V2) ||
                        (msg_type == BLEPIPE_MSG_LINK_STATS) ||
                        (msg_type == BLEPIPE_MSG_EVENT) ||
                        (msg_type == BLEPIPE_MSG_LOG) ||

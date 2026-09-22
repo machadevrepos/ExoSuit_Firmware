@@ -54,10 +54,12 @@ typedef enum {
   BLEPIPE_MSG_EVENT           = 0x23,
   BLEPIPE_MSG_LOG             = 0x24,
   BLEPIPE_MSG_ERROR           = 0x25,
+  BLEPIPE_MSG_TOPOLOGY_V2     = 0x26,
 
   BLEPIPE_MSG_TIME_SYNC       = 0x30,
   BLEPIPE_MSG_CONFIG_SET      = 0x31,
   BLEPIPE_MSG_STREAM_CONTROL  = 0x32,
+  BLEPIPE_MSG_STREAM_CONTROL_V2 = 0x33,
 
   BLEPIPE_MSG_CONFIG_READ     = 0x40,
   BLEPIPE_MSG_CONFIG_WRITE    = 0x41,
@@ -122,6 +124,24 @@ typedef struct __attribute__((packed)) {
   uint32_t session_id;
   uint32_t extend_timeout_ms;
 } blepipe_record_start_heartbeat_status_t;
+
+#define BLEPIPE_TOPOLOGY_PROTO_VER       2U
+#define BLEPIPE_STREAM_CONTROL_PROTO_VER 2U
+
+typedef struct __attribute__((packed)) {
+  uint8_t  protocol_version;
+  uint8_t  hub_id;
+  uint16_t present_source_mask;
+  uint16_t owned_source_mask;
+  uint16_t fault_source_mask;
+} blepipe_topology_v2_t;
+
+typedef struct __attribute__((packed)) {
+  uint8_t  protocol_version;
+  uint8_t  command;
+  uint16_t target_source_mask;
+  uint8_t  stream_interval_ms;
+} blepipe_stream_control_v2_t;
 
 uint16_t blepipe_crc16_ccitt(const uint8_t *data, size_t len);
 blepipe_status_t blepipe_encode(uint8_t *dst, size_t dst_len, const blepipe_hdr_t *hdr,

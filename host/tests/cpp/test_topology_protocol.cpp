@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 
 #include <exo/protocol/blepipe_proto.h>
@@ -58,6 +59,32 @@ void test_checked_blepipe_leaf_addresses()
     EXPECT_TRUE(!blepipe_leaf_id_from_node(1U, nullptr));
 }
 
+void test_versioned_control_and_topology_payloads()
+{
+    static_assert(BLEPIPE_MSG_TOPOLOGY_V2 != BLEPIPE_MSG_TOPOLOGY,
+                  "Topology V2 must not reuse the legacy message id");
+    static_assert(BLEPIPE_MSG_STREAM_CONTROL_V2 != BLEPIPE_MSG_STREAM_CONTROL,
+                  "Stream-control V2 must not reuse the legacy message id");
+    static_assert(sizeof(blepipe_topology_v2_t) == 8U,
+                  "Topology V2 wire format must remain compact");
+    static_assert(sizeof(blepipe_stream_control_v2_t) == 5U,
+                  "Stream-control V2 wire format must remain compact");
+
+    const blepipe_topology_v2_t topology = {
+        BLEPIPE_TOPOLOGY_PROTO_VER, 2U, 0x1003U, 0x007EU, 0x1000U
+    };
+    const uint8_t topology_expected[] = {
+        0x02U, 0x02U, 0x03U, 0x10U, 0x7EU, 0x00U, 0x00U, 0x10U
+    };
+    EXPECT_TRUE(std::memcmp(&topology, topology_expected, sizeof(topology_expected)) == 0);
+
+    const blepipe_stream_control_v2_t control = {
+        BLEPIPE_STREAM_CONTROL_PROTO_VER, 0xA2U, 0x1002U, 40U
+    };
+    const uint8_t control_expected[] = { 0x02U, 0xA2U, 0x02U, 0x10U, 0x28U };
+    EXPECT_TRUE(std::memcmp(&control, control_expected, sizeof(control_expected)) == 0);
+}
+
 }  // namespace
 
 int main()
@@ -65,6 +92,7 @@ int main()
     test_node_ranges_and_ownership();
     test_source_bits_cover_master_and_all_nodes();
     test_checked_blepipe_leaf_addresses();
+    test_versioned_control_and_topology_payloads();
 
     if (failures != 0) {
         std::cerr << failures << " topology/protocol check(s) failed\n";
