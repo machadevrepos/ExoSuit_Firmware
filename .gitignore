@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Training sessions — local-only until a dataset snapshot is deliberately committed
+/dataset/
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
+*.swp
