@@ -144,7 +144,7 @@ The proposal "make the idle UART-only STM the main" was analyzed and rejected:
 ### 3.4 What does NOT change
 
 - **Node firmware**: zero changes. Nodes advertise/connect exactly as today; a node does not know which hub it attached to.
-- **App-facing protocol**: BLE V2 live envelope (`ble_stream_v2.h`, frame id `0xB1`, 14 B header, `node_id` is `uint16_t`) and `blepipe` service over the air stay byte-identical. Lower-body streams appear to the app as ordinary node streams with IDs 7–12.
+- **App-facing protocol**: BLE V2 live envelope (`ble_stream_v2.h`, frame id `0xB1`, 14 B header, `node_id` is `uint16_t`) and `blepipe` service over the air stay byte-identical. Lower-body streams appear to the app as ordinary node streams with IDs 7–12. Existing four-node messages remain accepted byte-for-byte; new twelve-node masks and topology messages are explicitly versioned rather than inferred from legacy lengths.
 - **Host tools**: unchanged in v0 (they already tolerate arbitrary `node_id` values; verify when integrating — ⚠️ U8 ledger covers the injection-point format check).
 
 ---
@@ -190,26 +190,31 @@ The proposal "make the idle UART-only STM the main" was analyzed and rejected:
 - **DMA on both ends** (the WB55 pattern already exists: `DMA1_CH1` is configured for LPUART1; add channels for USART1). TX = circular ring buffer; RX = circular buffer + idle-line interrupt to delimit bursts.
 - No RTS/CTS exists on the board → flow control is **software-only** (§5.4).
 
-### 5.2 Frame format — reuse `blepipe` as-is
+### 5.2 Frame format — COBS envelope carrying BLEPipe
 
-Do **not** invent a new wire format. A UART bridge frame is exactly one blepipe packet:
+The UART transport has an explicit envelope around each BLEPipe frame. This
+keeps live freshness policy, reliable backpressure, bridge resets, and UART
+corruption recovery separate from the app-facing BLEPipe payload.
 
 ```
-offset  size  field (blepipe_hdr_t, packed)      notes
-0       1     proto_ver = 1                        BLEPIPE_PROTO_VER
-1       1     msg_type                             see §5.3
-2       1     flags                                bit0 = relayed-by-U11 (set by U11 on node→U9 forwarding)
-3       1     hop_count                            +1 per bridge crossing
-4       2     src_id                               original source (node 0x0101–0x010C, hub 0x0001/0x0002)
-6       2     dst_id                               0x0001 (U9) / 0x0002 (U11) / 0xFFFF broadcast
-8       4     seq                                  per-(src_id,msg_type) monotonic — used for gap detection
-12      4     timestamp_ms                         sender-local ms tick at emit time
-16      2     payload_len                          ≤ 222 (BLEPIPE_MAX_APP_PAYLOAD)
-18      n     payload
-18+n    2     CRC16-CCITT                          over header+payload, computed by blepipe_encode()
+COBS(
+  version                 u8
+  lane                    u8       // live or reliable
+  flags                   u16      // reliable, relayed, diagnostic bits
+  boot_epoch              u32      // changes after a hub reboot
+  sequence                u32      // per-lane sender sequence
+  payload_length          u16      // BLEPipe frame length
+  BLEPipe frame            bytes
+  CRC32                   u32      // covers the envelope header and BLEPipe frame
+) 0x00
 ```
 
-Total on-wire max = 244 B. Encode/decode **reuse existing functions**: `blepipe_encode()` / `blepipe_decode()` / `blepipe_crc16_ccitt()` from `firmware/common/inc/exo/protocol/blepipe_proto.h`. `blepipe_decode` already validates version/length/CRC — the RX parser exploits this for resync.
+The inner BLEPipe frame continues to use the existing
+`blepipe_encode()`/`blepipe_decode()`/`blepipe_crc16_ccitt()` helpers and keeps
+the app-facing protocol byte-compatible. The outer decoder must validate the
+version, lane, declared length, maximum length, CRC, and sequence. A malformed
+frame is dropped and the next delimiter must restore decoding without a
+reboot.
 
 ### 5.3 Message set (subset of `blepipe_msg_type_t` carried over the bridge, v0)
 
@@ -223,16 +228,20 @@ Total on-wire max = 244 B. Encode/decode **reuse existing functions**: `blepipe_
 | both | `BLEPIPE_MSG_EVENT` (0x23) | connect/disconnect events for lower nodes (drives app topology view) |
 | both | new `BLEPIPE_MSG_BRIDGE_HELLO = 0x50` (extend the enum in a bridge-scoped header, or reuse `DEVICE_INFO` 0x43) | 10 Hz heartbeat: uptime, TX ring high-water, RX resync count, firmware version |
 
-v0 scope **excludes** session-recording transfer across the bridge (U11 has no storage, so lower-body recordings crossing the bridge for archival is a **v1 work item**, §6.4). v0 = live streams + control + stats only.
+The first bring-up slice is live streams + control + stats only. Session-
+recording transfer across the bridge remains a later implementation slice, but
+it is required before production acceptance: lower-body recordings must cross
+U11 → UART → U9 and be archived without ambiguous or duplicated output.
 
 ### 5.4 Flow control, ordering, errors
 
-- **Drop-oldest per stream** (pattern already used hub-side): each lower-node stream gets a shallow queue (e.g., 4 frames); on overflow drop oldest, increment `dropped` in `LINK_STATS`. Never block the UART TX ring on a slow consumer.
-- **No credit flow control** on the UART: at 921600 there is ~6× headroom over worst-case v0 load; credits would add failure modes, not capacity.
-- **Seq gap detection**: per `(src_id, msg_type)`; gaps increment a counter surfaced in `LINK_STATS` (separates BLE-side drops inside U11 from UART drops).
-- **Resync rule**: on CRC/header failure the RX parser slides one byte and retries `blepipe_decode` (cheap: 244 B max window); additionally ≥ 2 byte-times of RX idle resets the parser to frame-start state. Target: recovery < 100 ms after corruption, no deadlock, no partial-frame acceptance.
-- **Timestamps**: preserve original `timestamp_ms` and any payload-embedded sample counters end-to-end. U9 may additionally re-stamp arrival time (the codebase already re-stamps forwarded data — reuse that pattern). Do **not** translate U11's tick into U9's tick in v0; the app aligns on node-local sample counters. Raw `DWT` values must never cross MCUs (per-MCU timebases are incomparable).
-- **Deadlock safety**: TX ring writes are non-blocking; if the ring is full, drop newest-from-slowest-stream (never spin). RX side: idle-line + half-buffer DMA callbacks only, no polling loops.
+- **Live lane:** one latest-value slot per source; overwrite stale unsent data, count overwrites and age, and never block the reliable lane.
+- **Reliable lane:** bounded FIFO with acknowledgements/retries, explicit backpressure, and no silent drops. Reliable traffic has priority, but rate limiting must prevent it from permanently starving live status.
+- **Seq gap detection:** per `(src_id, msg_type)` and outer sequence; expose gaps separately as BLE-side, UART framing, and bridge-queue loss.
+- **Resync rule:** validate the outer envelope and inner BLEPipe frame; discard malformed data until the next COBS delimiter. Recovery must not require a reboot or accept a partial frame.
+- **Time model:** U9 is the suit time authority. Synchronize U11 with periodic request/response samples and a filtered offset estimate; preserve node acquisition timestamps and report raw time, normalized suit time, arrival time, age, and offset uncertainty. Handle 32-bit millisecond wrap explicitly.
+- **Diagnostics:** every bridge status report includes boot epoch, last RX/TX sequence, CRC/framing/sequence errors, queue high-water marks, live overwrites, reliable retries, and clock-sync quality.
+- **Deadlock safety:** TX ring writes are non-blocking; RX uses DMA plus idle/half-buffer processing with no polling loops. The U11 hardware watchdog is serviced only after BLE event pumping and bridge processing have both made forward progress.
 
 ### 5.5 Why not synchronous mode
 
@@ -266,6 +275,12 @@ v0 scope **excludes** session-recording transfer across the bridge (U11 has no s
 
 **U11 main loop shape (per superloop iteration):** `exo_hub_central_client_process()` → `bridge_relay_pump()` (BLE→UART) → `bridge_uart_process()` (UART RX parse → relay/control) → `bridge_control_heartbeat()`. No blocking calls anywhere in the loop (existing loops already obey this).
 
+U11's independent hardware IWDG is enabled only after startup reaches a
+recoverable state. Its service condition depends on forward progress from both
+BLE event pumping and bridge processing; an unconditional loop kick is not
+acceptable. Startup, healthy, congested, and restarted states are reported to
+U9 with a boot epoch so stale reliable operations can be rejected.
+
 ### 6.2 U9 — master firmware changes
 
 1. **`CFG_BLE_NUM_LINK` 6 → 8** in `Master.ioc` (7 needed: 6 upper + 1 app; 8 = margin). Rebuild, then verify the 768 KiB flash / approximately 192 KiB CPU1 RAM linker budget, the 10 KiB shared-RAM reservation, and CPU2 BLE pool headroom in the `.map` (⚠️ U5). If RAM-tight: reduce unused GATT services on the peripheral side or trim pool sizes before accepting fewer links.
@@ -279,7 +294,15 @@ v0 scope **excludes** session-recording transfer across the bridge (U11 has no s
 
 ### 6.3 Node ID assignment / commissioning flow (unchanged mechanism, extended range)
 
-Commissioning stays "pair node → assign suit ID" as today, extended to 12: IDs 1–6 assign against U9, 7–12 against U11. The body-map (which ID = which body position) remains app-side configuration — no firmware files carry position data (consistent with the stakeholder decision that coaches never modify node files).
+Commissioning stays "pair node → assign suit ID" as today, extended to 12:
+factory-blank nodes use ID 0 and never enter normal live streaming; U9 owns
+IDs 1–6 and U11 owns IDs 7–12. Each hub commissions one selected candidate by
+BLE address, writes the ID, reads it back, verifies it, and only then allows
+normal reconnection. Duplicate IDs are a hard topology fault, not a reason to
+silently choose one node. The body-map (which ID = which body position)
+remains app-side configuration — no firmware files carry position data
+(consistent with the stakeholder decision that coaches never modify node
+files).
 
 ### 6.4 Deferred to v1 (documented, not built now)
 
