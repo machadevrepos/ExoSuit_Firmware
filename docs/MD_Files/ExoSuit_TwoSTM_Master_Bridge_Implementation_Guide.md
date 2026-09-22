@@ -1,7 +1,7 @@
 # ExoSuit Two-STM Master Bridge — Implementation & Validation Handbook
 
 **Repo:** `https://github.com/machadevrepos/ExoSuit_Firmware.git` (reviewed at commit `0b93253`, branch `main`)
-**Scope of this document:** Scaling the master from "1 hub + ≤4 leaves" to a 12-node suit using the **two STM32WB55CGU6 MCUs already on the Master PCB V1.0**, with no master PCB redesign and no changes to node firmware or the app-facing BLE protocol.
+**Scope of this document:** Scaling the master from "1 hub + ≤4 leaves" to a 12-node suit using the **two STM32WB55CCU6 MCUs already on the Master PCB V1.1**, with no master PCB redesign and no changes to node firmware or the app-facing BLE protocol.
 **Audience:** A coding agent (or engineer) that will implement firmware changes and execute the hardware validation plan.
 **Status of facts:** Everything in §2–§9 marked ✅ was verified against the repository (schematics PDF, `.ioc` files, header sources). Items marked ⚠️ UNVERIFIED (§10) must be confirmed on hardware before or during the phase where they matter.
 
@@ -26,7 +26,7 @@
 
 ## 1. Executive summary
 
-- The master PCB already carries **two STM32WB55CGU6** MCUs, each with a complete independent BLE RF chain (own antenna, filter, matching network) and own SWD debug header. Both radios are usable simultaneously.
+- The master PCB already carries **two STM32WB55CCU6** MCUs, each with a complete independent BLE RF chain (own antenna, filter, matching network) and own SWD debug header. Both radios are usable simultaneously.
 - **Decision (§3):** U9 ("Main MCU" in schematic, runs today's firmware) stays the **main/app-facing MCU**: upper-body 6 nodes + phone/app link (7 BLE links). U11 ("Sensor MCU", currently idle) becomes the **lower-body hub**: 6 nodes → UART relay to U9. Swapping the roles was evaluated and rejected (§3.3).
 - The inter-MCU link is almost certainly **USART1 on pins PB6/PB7** (configured synchronous with CK on PA8 in `Master.ioc` — a master-clocked USART only makes sense chip-to-chip). ⚠️ UNVERIFIED: continuity check U1.
 - The UART bridge reuses the existing `blepipe` framing (20 B header + CRC16-CCITT, 222 B max payload) so U9's parser can consume lower-body packets with existing code (§5).
@@ -35,13 +35,13 @@
 
 ---
 
-## 2. Verified hardware facts (Master PCB V1.0, `docs/Exo-Skeleton Master PCB Schematics Release 1_1.22.26.pdf`)
+## 2. Verified hardware facts (Master PCB V1.1, `docs/ExoSkeleton Master PCB V1.1.pdf`)
 
 ### 2.1 The two MCUs
 
 | Property | U9 — "Main MCU" | U11 — "Sensor MCU" |
 |---|---|---|
-| Part | STM32WB55CGU6 (QFN48) | STM32WB55CGU6 (QFN48) |
+| Part | STM32WB55CCU6 (QFN48) | STM32WB55CCU6 (QFN48) |
 | Power rail | `3V3_MCU2` (TPS63020 buck-boost 3V3) | `3V3_MCU1` (TPS63020 buck-boost 3V3) |
 | RF chain | ✅ RF1 → U10 MLPF-WB55-01E3 → ANT1 (2450AT18B100E) → `MCU2_ANT` | ✅ RF1 → U12 MLPF-WB55-01E3 → ANT2 (2450AT18B100E) → `MCU1_ANT` |
 | SWD debug | ✅ header T9–T13: `MCU2_PA13_DIO/CLK`, `MCU2_PB3_SWO`, `MCU2_NRST`, `MCU2_BOOT0` | ✅ header T14–T18: `MCU1_*` equivalents |
@@ -363,7 +363,7 @@ production profile or its 40–80 ms live-interval clamp.
 | U11 template (leaner loop, no storage) | `firmware/node/Core/Src/main.cpp` |
 | BLE stack config (NUM_LINK, MTU, DLE, TX power) | `firmware/master/Master.ioc` lines ~438–451 |
 | UART pin config (USART1 PB6/PB7/PA8, LPUART1 PB5/PA3) | `firmware/master/Master.ioc` lines ~256–299; same pins in `Node.ioc` |
-| Master schematics (MCUs, RF, bridges, power) | `docs/Exo-Skeleton Master PCB Schematics Release 1_1.22.26.pdf` |
+| Master schematics (MCUs, RF, bridges, power) | `docs/ExoSkeleton Master PCB V1.1.pdf` |
 | Record transfer chunking (for v1 bridge recording) | `firmware/common/inc/exo/protocol/ble_record_protocol.h`, `record_transfer_tuning.h` |
 
 ---
