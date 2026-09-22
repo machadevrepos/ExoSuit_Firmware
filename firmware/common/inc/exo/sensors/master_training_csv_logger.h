@@ -217,7 +217,7 @@ public:
     bool mark_source_complete(uint8_t source_id, uint32_t now_ms)
     {
         if (!ready_ || !validate_source_id(source_id)) return false;
-        const SourceMask source_bit = source_bit_for(source_id);
+        const SourceMask source_bit = exo::source_bit(source_id);
         if ((expected_source_mask_ & source_bit) == 0U) {
             return set_nonterminal(training_csv::TrainingCsvLogOperation::SourceNotExpected,
                     FR_INVALID_PARAMETER);
@@ -412,9 +412,9 @@ private:
     bool validate_append_source(uint8_t source_id)
     {
         if (!ready_ || !validate_source_id(source_id)) return false;
-        if ((expected_source_mask_ & source_bit_for(source_id)) == 0U)
+        if ((expected_source_mask_ & exo::source_bit(source_id)) == 0U)
             return set_nonterminal(training_csv::TrainingCsvLogOperation::SourceNotExpected, FR_INVALID_PARAMETER);
-        if ((completed_source_mask_ & source_bit_for(source_id)) != 0U)
+        if ((completed_source_mask_ & exo::source_bit(source_id)) != 0U)
             return set_nonterminal(training_csv::TrainingCsvLogOperation::SourceComplete, FR_INVALID_PARAMETER);
         return true;
     }
@@ -474,11 +474,6 @@ private:
     uint64_t previous_timestamp_us_[kSourceCount][2]{};
     bool previous_timestamp_valid_[kSourceCount][2]{};
     uint32_t last_sync_ms_ = 0U; uint32_t session_id_ = 0U; uint32_t row_sequence_ = 0U;
-    static SourceMask source_bit_for(uint8_t source_id)
-    {
-        return source_id <= 12U ? static_cast<SourceMask>(1U << source_id) : 0U;
-    }
-
     SourceMask expected_source_mask_ = 0U; SourceMask completed_source_mask_ = 0U;
     bool file_open_ = false; bool ready_ = false; bool terminal_error_ = false; bool published_ = false;
     uint16_t file_index_ = 0U;

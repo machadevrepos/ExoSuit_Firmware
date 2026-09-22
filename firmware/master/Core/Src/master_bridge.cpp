@@ -58,12 +58,8 @@ uint8_t node_id_from_pipe(const blepipe_hdr_t &header)
 {
     const uint16_t ids[] = {header.src_id, header.dst_id};
     for (const uint16_t id : ids) {
-        if (id >= BLEPIPE_ID_LEAF_1 && id <= (BLEPIPE_ID_LEAF_1 + 11U)) {
-            return static_cast<uint8_t>((id - BLEPIPE_ID_LEAF_1) + 1U);
-        }
-        if (id >= 1U && id <= 12U) {
-            return static_cast<uint8_t>(id);
-        }
+        const uint8_t node_id = blepipe_node_id_from_wire_id(id);
+        if (node_id != 0U) return node_id;
     }
     return 0U;
 }
@@ -182,8 +178,10 @@ void dispatch(const exo::bridge::Frame &frame, const uint8_t *packet)
         blepipe_topology_v2_t topology{};
         if (blepipe_topology_v2_decode(payload, payload_length, &topology) ==
             BLEPIPE_STATUS_OK && topology.hub_id == static_cast<uint8_t>(exo::HubId::Lower)) {
-            for (uint8_t node_id = 7U; node_id <= 12U; ++node_id) {
-                const uint16_t bit = static_cast<uint16_t>(1U << node_id);
+            for (uint8_t node_id = exo::kFirstNodeId;
+                 node_id <= exo::kLastNodeId; ++node_id) {
+                if (!exo::hub_owns_node(exo::HubId::Lower, node_id)) continue;
+                const exo::SourceMask bit = exo::source_bit(node_id);
                 if ((topology.present_source_mask & bit) != 0U) {
                     exo_hub_leaf_topology_touch(node_id);
                 }

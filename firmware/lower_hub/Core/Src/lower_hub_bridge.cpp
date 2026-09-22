@@ -71,17 +71,8 @@ uint8_t source_id_from_pipe(const uint8_t *packet, uint16_t length)
     if (blepipe_decode(packet, length, &header, &payload, &payload_length) != BLEPIPE_STATUS_OK) {
         return 0U;
     }
-    if (header.src_id >= BLEPIPE_ID_LEAF_1 &&
-        header.src_id <= BLEPIPE_ID_LEAF_1 + 11U) {
-        return static_cast<uint8_t>((header.src_id - BLEPIPE_ID_LEAF_1) + 1U);
-    }
-    if (header.dst_id >= BLEPIPE_ID_LEAF_1 &&
-        header.dst_id <= BLEPIPE_ID_LEAF_1 + 11U) {
-        return static_cast<uint8_t>((header.dst_id - BLEPIPE_ID_LEAF_1) + 1U);
-    }
-    if (header.src_id <= 12U) return static_cast<uint8_t>(header.src_id);
-    if (header.dst_id <= 12U) return static_cast<uint8_t>(header.dst_id);
-    return 0U;
+    const uint8_t source_id = blepipe_node_id_from_wire_id(header.src_id);
+    return source_id != 0U ? source_id : blepipe_node_id_from_wire_id(header.dst_id);
 }
 
 bool queue_blepipe(exo::bridge::Lane lane, const uint8_t *packet, uint16_t length)
@@ -118,20 +109,15 @@ void dispatch_incoming(const exo::bridge::Frame &frame, const uint8_t *payload)
 
     const uint16_t destination = header.dst_id;
     if (destination == BLEPIPE_ID_BROADCAST) {
-        for (uint8_t node = 7U; node <= 12U; ++node) {
+        for (uint8_t node = exo::kFirstNodeId; node <= exo::kLastNodeId; ++node) {
+            if (!exo::hub_owns_node(exo::HubId::Lower, node)) continue;
             (void)exo_hub_central_client_send_blepipe_to_node(
                 node, header.msg_type, header.src_id, body, body_length);
         }
         return;
     }
-    uint8_t node_id = 0U;
-    if (destination >= BLEPIPE_ID_LEAF_1 &&
-        destination <= BLEPIPE_ID_LEAF_1 + 11U) {
-        node_id = static_cast<uint8_t>((destination - BLEPIPE_ID_LEAF_1) + 1U);
-    } else if (destination >= 7U && destination <= 12U) {
-        node_id = static_cast<uint8_t>(destination);
-    }
-    if (node_id >= 7U && node_id <= 12U) {
+    const uint8_t node_id = blepipe_node_id_from_wire_id(destination);
+    if (exo::hub_owns_node(exo::HubId::Lower, node_id)) {
         (void)exo_hub_central_client_send_blepipe_to_node(
             node_id, header.msg_type, header.src_id,
             body, body_length);

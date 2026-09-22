@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include <exo/bridge/frame_codec.h>
 
@@ -64,9 +65,7 @@ public:
             pending_.payload_length > payload_capacity) {
             return false;
         }
-        for (uint16_t i = 0U; i < pending_.payload_length; ++i) {
-            payload[i] = payload_[i];
-        }
+        std::memcpy(payload, payload_, pending_.payload_length);
         frame = pending_;
         frame.payload = payload;
         pending_valid_ = false;

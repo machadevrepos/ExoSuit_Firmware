@@ -44,6 +44,14 @@ void test_source_bits_cover_master_and_all_nodes()
     EXPECT_TRUE(exo::source_bit(13U) == 0U);
 }
 
+void test_blepipe_node_id_mapping()
+{
+    EXPECT_TRUE(blepipe_node_id_from_wire_id(BLEPIPE_ID_LEAF_1) == 1U);
+    EXPECT_TRUE(blepipe_node_id_from_wire_id(BLEPIPE_ID_LEAF_1 + 11U) == 12U);
+    EXPECT_TRUE(blepipe_node_id_from_wire_id(8U) == 8U);
+    EXPECT_TRUE(blepipe_node_id_from_wire_id(BLEPIPE_ID_BROADCAST) == 0U);
+}
+
 void test_checked_blepipe_leaf_addresses()
 {
     static_assert(BLEPIPE_ID_HUB2 == 0x0002U, "U11 must have a stable BLEPipe id");
@@ -129,6 +137,7 @@ int main()
 {
     test_node_ranges_and_ownership();
     test_source_bits_cover_master_and_all_nodes();
+    test_blepipe_node_id_mapping();
     test_checked_blepipe_leaf_addresses();
     test_versioned_control_and_topology_payloads();
 

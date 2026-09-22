@@ -30,6 +30,15 @@ static inline int blepipe_leaf_id_from_node(uint8_t node_id, uint16_t *out_id)
   return 1;
 }
 
+/* Map either a wire leaf ID or a compact node ID to the common node range. */
+static inline uint8_t blepipe_node_id_from_wire_id(uint16_t wire_id)
+{
+  if (wire_id >= BLEPIPE_ID_LEAF_1 && wire_id <= (BLEPIPE_ID_LEAF_1 + 11U)) {
+    return (uint8_t)((wire_id - BLEPIPE_ID_LEAF_1) + 1U);
+  }
+  return wire_id >= 1U && wire_id <= 12U ? (uint8_t)wire_id : 0U;
+}
+
 typedef enum {
   BLEPIPE_LANE_DATA_TX = 0,
   BLEPIPE_LANE_CONTROL_RX,
