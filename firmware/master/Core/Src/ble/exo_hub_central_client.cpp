@@ -512,6 +512,8 @@ static void exo_send_disc_report(exo_disc_event_t event_id,
                                  uint8_t state,
                                  uint16_t value)
 {
+  /* Lower Hub has no phone-facing report transport. */
+#ifndef EXO_HUB_LOWER_BUILD
   uint8_t payload[8];
   payload[0] = (uint8_t)event_id;
   payload[1] = node_id;
@@ -522,6 +524,13 @@ static void exo_send_disc_report(exo_disc_event_t event_id,
   payload[6] = exo_hub_central_client_ready_node_mask();
   payload[7] = exo_hub_central_client_transport_ready_node_mask();
   (void)EXO_HUB_SEND_CMD_REPORT(EXO_HUB_DISC_REPORT_ID, payload, (uint8_t)sizeof(payload));
+#else
+  (void)event_id;
+  (void)node_id;
+  (void)slot_index;
+  (void)state;
+  (void)value;
+#endif
 }
 
 static void exo_report_link_tune(uint8_t slot_index)
@@ -1261,6 +1270,8 @@ static uint8_t exo_hub_maybe_queue_record_done(const uint8_t *payload,
   return 0U;
 }
 
+/* Raw-artifact classification is only needed by the U9 phone/recording path. */
+#ifndef EXO_HUB_LOWER_BUILD
 static uint8_t exo_is_raw_artifact_frame(const uint8_t *payload, uint16_t length)
 {
   exo::RecordReliableFrameHeader header;
@@ -1286,6 +1297,7 @@ static uint8_t exo_is_raw_artifact_frame(const uint8_t *payload, uint16_t length
   return (header.frame_type == static_cast<uint8_t>(exo::RecordReliableType::Manifest) ||
           header.frame_type == static_cast<uint8_t>(exo::RecordReliableType::Chunk)) ? 1U : 0U;
 }
+#endif /* !EXO_HUB_LOWER_BUILD */
 
 static uint8_t exo_suppress_raw_artifact_relay(uint8_t node_id,
                                                 const uint8_t *payload,

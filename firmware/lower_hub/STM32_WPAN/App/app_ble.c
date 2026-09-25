@@ -357,10 +357,13 @@ static void BLE_StatusNot(HCI_TL_CmdStatus_t Status);
 static void Ble_Tl_Init(void);
 static void Ble_Hci_Gap_Gatt_Init(void);
 static const uint8_t* BleGetBdAddress(void);
+/* U11 is central-only; generated peripheral advertising helpers are not built. */
+#if (BLE_CFG_PERIPHERAL != 0)
 static void Adv_Request(APP_BLE_ConnStatus_t NewStatus);
 static void Adv_Cancel(void);
 static void Adv_Cancel_Req(void);
 static void Switch_OFF_GPIO(void);
+#endif /* BLE_CFG_PERIPHERAL != 0 */
 #if (L2CAP_REQUEST_NEW_CONN_PARAM != 0)
 static void BLE_SVC_L2CAP_Conn_Update(uint16_t ConnectionHandle);
 static void Connection_Interval_Update_Req(void);
@@ -470,7 +473,9 @@ void APP_BLE_Init(void)
   /**
    * From here, all initialization are BLE application specific
    */
+#if (BLE_CFG_PERIPHERAL != 0)
   UTIL_SEQ_RegTask(1<<CFG_TASK_ADV_CANCEL_ID, UTIL_SEQ_RFU, Adv_Cancel);
+#endif /* BLE_CFG_PERIPHERAL != 0 */
 #if (L2CAP_REQUEST_NEW_CONN_PARAM != 0)
   UTIL_SEQ_RegTask(1<<CFG_TASK_CONN_UPDATE_REG_ID, UTIL_SEQ_RFU, Connection_Interval_Update_Req);
 #endif /* L2CAP_REQUEST_NEW_CONN_PARAM != 0 */
@@ -1186,6 +1191,7 @@ static void Ble_Hci_Gap_Gatt_Init(void)
   APP_DBG_MSG("==>> End Ble_Hci_Gap_Gatt_Init function\n\r");
 }
 
+#if (BLE_CFG_PERIPHERAL != 0)
 static void Adv_Request(APP_BLE_ConnStatus_t NewStatus)
 {
   tBleStatus ret = BLE_STATUS_INVALID_PARAMS;
@@ -1275,6 +1281,7 @@ static void Adv_Request(APP_BLE_ConnStatus_t NewStatus)
 
   return;
 }
+#endif /* BLE_CFG_PERIPHERAL != 0 */
 
 const uint8_t* BleGetBdAddress(void)
 {
@@ -1333,6 +1340,7 @@ const uint8_t* BleGetBdAddress(void)
  * SPECIFIC FUNCTIONS FOR P2P SERVER
  *
  *************************************************************/
+#if (BLE_CFG_PERIPHERAL != 0)
 static void Adv_Cancel(void)
 {
   /* USER CODE BEGIN Adv_Cancel_1 */
@@ -1385,6 +1393,7 @@ static void Switch_OFF_GPIO()
 
   /* USER CODE END Switch_OFF_GPIO */
 }
+#endif /* BLE_CFG_PERIPHERAL != 0 */
 
 #if (L2CAP_REQUEST_NEW_CONN_PARAM != 0)
 void BLE_SVC_L2CAP_Conn_Update(uint16_t ConnectionHandle)

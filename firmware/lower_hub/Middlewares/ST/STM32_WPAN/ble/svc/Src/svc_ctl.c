@@ -234,7 +234,10 @@ __WEAK SVCCTL_UserEvtFlowStatus_t SVCCTL_UserEvtRx( void *pckt )
   evt_blecore_aci *blecore_evt;
   SVCCTL_EvtAckStatus_t event_notification_status;
   SVCCTL_UserEvtFlowStatus_t return_status;
+  /* The U11 central-only configuration disables both callback tables. */
+#if (BLE_CFG_SVC_MAX_NBR_CB > 0) || (BLE_CFG_CLT_MAX_NBR_CB > 0)
   uint8_t index;
+#endif
 
   event_pckt = (hci_event_pckt*) ((hci_uart_pckt *) pckt)->data;
   event_notification_status = SVCCTL_EvtNotAck;
